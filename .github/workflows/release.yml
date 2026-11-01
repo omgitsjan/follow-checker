@@ -27,6 +27,7 @@ jobs:
           node scripts/validate-extension.mjs
           node --check content.js
           node --check ig-bridge.js
+          node --check background.js
           node --check fc-shared.js
           node --check github.js
           node --check bluesky.js
@@ -54,6 +55,7 @@ jobs:
             manifest.json \
             content.js \
             ig-bridge.js \
+            background.js \
             fc-shared.js \
             github.js \
             bluesky.js \

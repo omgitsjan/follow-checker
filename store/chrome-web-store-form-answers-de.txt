@@ -39,6 +39,13 @@ Die Host-Berechtigungen für https://www.instagram.com/* (und zugehörige Bild-C
 (Zeichen ca.: 471)
 
 
+5b) Begründung für cookies (neu in 1.4.1)
+-----------------------------------------
+cookies wird nur genutzt, um zwei Instagram-Cookies auf https://www.instagram.com zu lesen: ds_user_id (die numerische ID des Kontos, mit dem der Nutzer eingeloggt ist) und csrftoken (der Anti-CSRF-Wert, den Instagram bei seinen eigenen Web-Anfragen verlangt). Setzt Instagram diese als HttpOnly, kann das Content Script sie nicht lesen und die Erweiterung nicht erkennen, für welches Konto sie die Listen laden soll. Die Werte gehen nur an den offenen instagram.com-Tab des Nutzers, werden weder gespeichert noch an den Entwickler oder Dritte übertragen, und es werden keine anderen Cookies (auch nicht sessionid) oder anderen Websites gelesen.
+
+(Zeichen ca.: 672)
+
+
 6) Remote Code?
 ---------------
 Antwort: Nein, ich verwende "Remote Code" nicht.

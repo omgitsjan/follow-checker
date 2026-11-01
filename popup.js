@@ -1176,7 +1176,7 @@ async function ensureContentScript(tabId) {
 
 function formatProgress(msg) {
   if (msg.stage === "user" && msg.me) {
-    return t("progressAccount", { user: msg.me.username });
+    return t("progressAccount", { user: msg.me.username || msg.me.id });
   }
   if (msg.stage === "following") {
     const total =

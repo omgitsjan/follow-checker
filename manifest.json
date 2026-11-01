@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Follow Checker",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Follow relationships on Instagram, GitHub, and Bluesky. Session-only, unofficial.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": ["activeTab", "scripting", "storage", "cookies"],
   "host_permissions": [
     "https://www.instagram.com/*",
     "https://*.cdninstagram.com/*",
@@ -13,6 +13,9 @@
     "https://bsky.app/*",
     "https://public.api.bsky.app/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Follow Checker",

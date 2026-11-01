@@ -38,6 +38,13 @@ Host access to https://www.instagram.com/* (and related image CDNs) is required 
 (~382 chars)
 
 
+5b) Justification for cookies (added in 1.4.1)
+----------------------------------------------
+cookies is used only to read two Instagram cookies on https://www.instagram.com: ds_user_id (the numeric id of the account the user is logged in with) and csrftoken (the anti-CSRF value Instagram requires on its own web requests). When Instagram marks these as HttpOnly, the content script cannot read them and the extension cannot tell which account's follow lists to load. The values are passed only to the user's open instagram.com tab, are never stored or sent to the developer or any third party, and no other cookies (including sessionid) or other sites are read.
+
+(~578 chars)
+
+
 6) Remote code
 --------------
 Select: No, I am not using Remote Code.

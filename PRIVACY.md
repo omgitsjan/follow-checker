@@ -105,6 +105,7 @@ The Extension does **not** load or execute remote JavaScript/Wasm. All extension
 | `activeTab` / tab messaging | Communicate with the open Instagram, GitHub, or Bluesky tab to start analysis and actions |
 | `scripting` | Inject/ensure the content script on that site when needed |
 | `storage` | Save language, unfollow mode, and the last local result |
+| `cookies` | Read only `ds_user_id` (your numeric Instagram account id) and `csrftoken` on instagram.com when Instagram marks them HttpOnly, so the open Instagram tab knows which account is logged in. Values are not stored or sent anywhere; `sessionid` and other sites are never read |
 | Host access to `instagram.com`, `github.com`, `api.github.com`, `bsky.app`, `public.api.bsky.app` (and Instagram image CDNs) | Read relationship lists via the logged-in session and show profile pictures |
 
 ---

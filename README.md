@@ -128,12 +128,20 @@ node scripts/package-zip.mjs
 
 ---
 
+## Changelog
+
+- **1.4.1** – Fix "Could not detect your account" on Instagram. Account detection now tries several sources in turn (ds_user_id cookie via the `cookies` permission when HttpOnly, Instagram's page modules and inline JSON, the viewer GraphQL query, the edit-profile form data, the profile GraphQL query) instead of relying on `/api/v1/users/{id}/info/`, which Instagram now rejects on the web ("useragent mismatch"). If only the account id can be found, the analysis still runs.
+- **1.4.0** – GitHub & Bluesky, Instagram page bridge, safe unfollow mode.
+
+---
+
 ## Project structure
 
 | File | Role |
 |------|------|
 | `manifest.json` | MV3, host permissions for Instagram, GitHub, Bluesky |
-| `content.js` / `ig-bridge.js` | Instagram session: lists, optional direct follow/unfollow |
+| `content.js` / `ig-bridge.js` | Instagram session: account detection, lists, optional direct follow/unfollow |
+| `background.js` | Reads only `ds_user_id` / `csrftoken` for instagram.com when they are HttpOnly (`cookies` permission) |
 | `github.js` / `bluesky.js` | Lists for those sites. Unfollow always opens the profile |
 | `platforms.js` | Which open tab the popup talks to |
 | `popup.*` | UI: sections, tiles, charts, bots, settings |
@@ -171,6 +179,7 @@ Local checks:
 node scripts/validate-extension.mjs
 node --check content.js
 node --check ig-bridge.js
+node --check background.js
 node --check fc-shared.js
 node --check github.js
 node --check bluesky.js

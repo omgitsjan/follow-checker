@@ -9,6 +9,8 @@ const DELAY_MS = 900; // Pause zwischen Seiten, um Rate-Limits zu vermeiden
 
 let igWwwClaim = "";
 let igBridgeState = "unknown";
+let igCsrfToken = "";
+let igCookieLookupDone = false;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -21,7 +23,7 @@ function getCookie(name) {
 
 /** App id / ASBD / claim from the page Instagram already rendered. */
 function scrapeIgBootstrap() {
-  const found = { appId: "", asbd: "", claim: "", lsd: "" };
+  const found = { appId: "", asbd: "", claim: "", lsd: "", dtsg: "", csrf: "" };
   const scripts = document.querySelectorAll("script:not([src])");
   for (const script of scripts) {
     const text = script.textContent || "";
@@ -42,7 +44,15 @@ function scrapeIgBootstrap() {
       const match = text.match(/"LSD"\s*,\s*\[\]\s*,\s*\{\s*"token"\s*:\s*"([^"]+)"/);
       if (match) found.lsd = match[1];
     }
-    if (found.appId && found.asbd && found.claim && found.lsd) break;
+    if (!found.dtsg) {
+      const match = text.match(/"DTSGInitialData"\s*,\s*\[\]\s*,\s*\{\s*"token"\s*:\s*"([^"]+)"/);
+      if (match) found.dtsg = match[1];
+    }
+    if (!found.csrf) {
+      const match = text.match(/"csrf_token"\s*:\s*"([^"]{8,})"/);
+      if (match) found.csrf = match[1];
+    }
+    if (found.appId && found.asbd && found.claim && found.lsd && found.dtsg && found.csrf) break;
   }
   return found;
 }
@@ -52,7 +62,7 @@ function igHeaders() {
   const headers = {
     "x-ig-app-id": boot.appId || IG_APP_ID,
     "x-requested-with": "XMLHttpRequest",
-    "x-csrftoken": getCookie("csrftoken") || "",
+    "x-csrftoken": getCookie("csrftoken") || igCsrfToken || boot.csrf || "",
     Accept: "*/*",
   };
   if (boot.asbd) headers["x-asbd-id"] = boot.asbd;
@@ -137,6 +147,7 @@ function parseIgBody(status, text) {
 
 async function igFetch(url, options = {}) {
   const method = options.method || "GET";
+  if (!getCookie("csrftoken") && !igCsrfToken && !igCookieLookupDone) await getIgCookies();
   const headers = {
     ...igHeaders(),
     ...(options.headers || {}),
@@ -247,82 +258,322 @@ async function fetchImageAsDataUrl(imageUrl) {
   }
 }
 
-async function getCurrentUser() {
-  // 1) Cookie ds_user_id + Profil-Info
-  const userId = getCookie("ds_user_id");
-  if (userId) {
-    try {
-      const data = await igFetch(
-        `https://www.instagram.com/api/v1/users/${userId}/info/`
-      );
-      if (data?.user) {
-        return {
-          id: String(data.user.pk || data.user.id || userId),
-          username: data.user.username,
-          fullName: data.user.full_name || "",
-          profilePic: data.user.profile_pic_url || "",
-          followersCount: data.user.follower_count ?? null,
-          followingCount: data.user.following_count ?? null,
-        };
-      }
-    } catch {
-      /* fallbacks below */
-    }
-  }
+/* ------------------------------------------------------------------------- */
+/* Account detection                                                          */
+/* Instagram keeps moving where the logged-in user is exposed. Every source   */
+/* below is optional; the first one that yields an id + username wins.        */
+/* ------------------------------------------------------------------------- */
 
-  // 2) web_profile_info mit Username aus URL
-  const pathUser = location.pathname.match(/^\/([A-Za-z0-9._]+)\/?$/);
-  if (pathUser && !["accounts", "explore", "reels", "direct", "stories"].includes(pathUser[1])) {
-    try {
-      const data = await igFetch(
-        `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(pathUser[1])}`
-      );
-      const u = data?.data?.user;
-      if (u) {
-        return {
-          id: String(u.id),
-          username: u.username,
-          fullName: u.full_name || "",
-          profilePic: u.profile_pic_url || "",
-          followersCount: u.edge_followed_by?.count ?? null,
-          followingCount: u.edge_follow?.count ?? null,
-        };
-      }
-    } catch {
-      /* continue */
-    }
-  }
+const IG_RESERVED_PATHS = new Set([
+  "accounts", "explore", "reels", "reel", "direct", "stories", "p", "tv",
+  "about", "legal", "developer", "challenge", "emails", "session", "web",
+  "api", "graphql", "privacy", "terms", "lite", "nametag", "directory", "ar",
+]);
+const IG_VIEWER_QUERY_HASH = "d6f4427fbe92d846298cf93df0b937d3";
+const IG_PROFILE_DOC_ID = "25980296051578533"; // PolarisProfilePageContentQuery
 
-  // 3) Shared data / embedded JSON
+function isIgUserId(value) {
+  return /^\d{3,25}$/.test(String(value || ""));
+}
+
+function isIgUsername(value) {
+  const v = String(value || "");
+  return /^[A-Za-z0-9._]{1,30}$/.test(v) && !IG_RESERVED_PATHS.has(v.toLowerCase());
+}
+
+function decodeJsonString(raw) {
   try {
-    const html = document.documentElement.innerHTML;
-    const m =
-      html.match(/"viewerId"\s*:\s*"(\d+)"/) ||
-      html.match(/"id"\s*:\s*"(\d+)"\s*,\s*"username"\s*:\s*"([^"]+)"/);
-    if (m) {
-      const id = m[1];
-      const username = m[2] || null;
-      if (username) {
-        return { id, username, fullName: "", profilePic: "", followersCount: null, followingCount: null };
+    return JSON.parse(`"${raw}"`);
+  } catch {
+    return raw;
+  }
+}
+
+/** ds_user_id / csrftoken – document.cookie first, then the extension cookie API (HttpOnly-safe). */
+async function getIgCookies() {
+  const out = {
+    dsUserId: getCookie("ds_user_id") || "",
+    csrftoken: getCookie("csrftoken") || igCsrfToken || "",
+  };
+  if (!isIgUserId(out.dsUserId) || !out.csrftoken) {
+    igCookieLookupDone = true;
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "FC_IG_COOKIES" });
+      if (res?.ok) {
+        if (!isIgUserId(out.dsUserId) && isIgUserId(res.dsUserId)) out.dsUserId = res.dsUserId;
+        if (!out.csrftoken && res.csrftoken) out.csrftoken = res.csrftoken;
       }
-      const info = await igFetch(`https://www.instagram.com/api/v1/users/${id}/info/`);
-      if (info?.user) {
-        return {
-          id: String(info.user.pk || id),
-          username: info.user.username,
-          fullName: info.user.full_name || "",
-          profilePic: info.user.profile_pic_url || "",
-          followersCount: info.user.follower_count ?? null,
-          followingCount: info.user.following_count ?? null,
-        };
+    } catch {
+      /* background not reachable (e.g. extension reloaded) */
+    }
+  }
+  if (!isIgUserId(out.dsUserId)) out.dsUserId = "";
+  if (out.csrftoken) igCsrfToken = out.csrftoken;
+  return out;
+}
+
+/** Viewer data from the page's own JS modules (MAIN world via ig-bridge.js). */
+function bridgeViewer() {
+  if (igBridgeState === "missing") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timer = setTimeout(() => {
+      window.removeEventListener("message", onMessage);
+      resolve(null);
+    }, 1500);
+    function onMessage(event) {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== "fc-bridge" || data.id !== id) return;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      resolve(data.viewer || null);
+    }
+    window.addEventListener("message", onMessage);
+    window.postMessage({ source: "fc-content", type: "FC_VIEWER", id }, location.origin);
+  });
+}
+
+/** Viewer data from inline JSON Instagram ships with the page. */
+function scrapeViewerFromPage() {
+  const found = { ids: [], username: "", fullName: "", profilePic: "", csrf: "" };
+  const addId = (v) => {
+    if (isIgUserId(v) && !found.ids.includes(v)) found.ids.push(v);
+  };
+  const readBlock = (text, start) => {
+    const block = text.slice(start, start + 4000);
+    const id = block.match(/"(?:id|pk|user_id)"\s*:\s*"?(\d{3,25})"?/);
+    const username = block.match(/"username"\s*:\s*"([A-Za-z0-9._]{1,30})"/);
+    const fullName = block.match(/"full_name"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const pic = block.match(/"profile_pic_url(?:_hd)?"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    return {
+      id: id ? id[1] : "",
+      username: username ? username[1] : "",
+      fullName: fullName ? decodeJsonString(fullName[1]) : "",
+      profilePic: pic ? decodeJsonString(pic[1]) : "",
+    };
+  };
+
+  const scripts = document.querySelectorAll("script:not([src])");
+  for (const script of scripts) {
+    const text = script.textContent || "";
+    if (text.length < 20) continue;
+
+    // Viewer objects (PolarisViewer module, XIGSharedData config.viewer)
+    for (const marker of ['"PolarisViewer"', '"viewer":{', '"viewer": {']) {
+      let idx = text.indexOf(marker);
+      while (idx !== -1 && !found.username) {
+        const block = readBlock(text, idx);
+        if (block.username && isIgUsername(block.username)) {
+          addId(block.id);
+          found.username = block.username;
+          found.fullName = block.fullName;
+          found.profilePic = block.profilePic;
+        }
+        idx = text.indexOf(marker, idx + marker.length);
       }
     }
-  } catch {
-    /* continue */
+
+    for (const re of [
+      /"viewerId"\s*:\s*"(\d{3,25})"/,
+      /"viewer_id"\s*:\s*"(\d{3,25})"/,
+      /"NON_FACEBOOK_USER_ID"\s*:\s*"(\d{3,25})"/,
+    ]) {
+      const m = text.match(re);
+      if (m) addId(m[1]);
+    }
+
+    if (!found.csrf) {
+      const m = text.match(/"csrf_token"\s*:\s*"([^"]{8,})"/);
+      if (m) found.csrf = m[1];
+    }
+  }
+  return found;
+}
+
+/** Last resort: the profile link in Instagram's nav whose avatar alt text names the user. */
+function scrapeUsernameFromNav() {
+  const links = document.querySelectorAll('nav a[href^="/"], [role="navigation"] a[href^="/"]');
+  for (const a of links) {
+    const m = (a.getAttribute("href") || "").match(/^\/([A-Za-z0-9._]{1,30})\/?$/);
+    if (!m || !isIgUsername(m[1])) continue;
+    const img = a.querySelector("img[alt]");
+    const alt = (img?.getAttribute("alt") || "").toLowerCase();
+    if (alt.includes(m[1].toLowerCase())) return m[1];
+  }
+  return "";
+}
+
+function meFromUserObject(u, fallbackId = "") {
+  if (!u) return null;
+  const id = String(u.pk || u.id || u.pk_id || fallbackId || "");
+  if (!isIgUserId(id) && !u.username) return null;
+  return {
+    id: isIgUserId(id) ? id : "",
+    username: u.username || "",
+    fullName: u.full_name || "",
+    profilePic: u.profile_pic_url_hd || u.hd_profile_pic_url_info?.url || u.profile_pic_url || "",
+    followersCount: u.follower_count ?? u.edge_followed_by?.count ?? null,
+    followingCount: u.following_count ?? u.edge_follow?.count ?? null,
+  };
+}
+
+async function fetchProfileByUsername(username) {
+  const data = await igFetch(
+    `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`
+  );
+  return meFromUserObject(data?.data?.user);
+}
+
+async function fetchProfileByIdGraphql(userId) {
+  const boot = scrapeIgBootstrap();
+  const params = new URLSearchParams({
+    variables: JSON.stringify({ id: String(userId), render_surface: "PROFILE" }),
+    doc_id: IG_PROFILE_DOC_ID,
+    server_timestamps: "true",
+  });
+  if (boot.lsd) params.set("lsd", boot.lsd);
+  if (boot.dtsg) params.set("fb_dtsg", boot.dtsg);
+  const data = await igFetch("https://www.instagram.com/graphql/query", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  return meFromUserObject(data?.data?.user, userId);
+}
+
+async function getCurrentUser() {
+  const errors = [];
+  const attempt = async (label, fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      errors.push(`${label}: ${err?.message || err}`);
+      return null;
+    }
+  };
+
+  // --- 1) Id candidates without extra API calls ---
+  const cookies = await getIgCookies();
+  const page = scrapeViewerFromPage();
+  if (page.csrf && !igCsrfToken && !getCookie("csrftoken")) igCsrfToken = page.csrf;
+  const bridged = await bridgeViewer();
+
+  const ids = [];
+  const addId = (v) => {
+    if (isIgUserId(v) && !ids.includes(String(v))) ids.push(String(v));
+  };
+  addId(cookies.dsUserId);
+  addId(bridged?.id);
+  page.ids.forEach(addId);
+  const userId = ids[0] || "";
+
+  const finish = (profile, base) => ({
+    ...profile,
+    fullName: profile.fullName || base?.fullName || "",
+    profilePic: profile.profilePic || base?.profilePic || "",
+  });
+
+  /**
+   * Resolve a username to the full profile. `strong` = the source is known to
+   * describe the logged-in viewer; weak hints must match the known user id.
+   */
+  const resolve = async (base, strong) => {
+    if (!base?.username) return null;
+    const profile = await attempt("web_profile_info", () => fetchProfileByUsername(base.username));
+    if (profile?.id) {
+      if (strong || !userId || profile.id === userId) return finish(profile, base);
+      return null; // weak hint pointed at someone else
+    }
+    if (!strong) return null;
+    const id = base.id || userId;
+    if (!id) return null;
+    let counts = base;
+    if (counts.followersCount == null) {
+      counts = (await attempt("profile query", () => fetchProfileByIdGraphql(id))) || base;
+    }
+    return {
+      id,
+      username: base.username,
+      fullName: base.fullName || counts.fullName || "",
+      profilePic: base.profilePic || counts.profilePic || "",
+      followersCount: counts.followersCount ?? null,
+      followingCount: counts.followingCount ?? null,
+    };
+  };
+
+  // --- 2) Sources, cheapest / most reliable first ---
+  const sources = [
+    // Instagram's own JS modules in the page (MAIN world)
+    async () =>
+      bridged?.username && isIgUsername(bridged.username)
+        ? [meFromUserObject({ id: bridged.id, username: bridged.username, full_name: bridged.fullName, profile_pic_url: bridged.profilePic }, userId), true]
+        : null,
+    // Inline viewer JSON in the HTML
+    async () =>
+      page.username
+        ? [meFromUserObject({ id: page.ids[0], username: page.username, full_name: page.fullName, profile_pic_url: page.profilePic }, userId), false]
+        : null,
+    // Legacy viewer GraphQL query (still used by instaloader's login check)
+    async () => {
+      const data = await igFetch(
+        `https://www.instagram.com/graphql/query/?query_hash=${IG_VIEWER_QUERY_HASH}&variables=%7B%7D`
+      );
+      return [meFromUserObject(data?.data?.user, userId), true];
+    },
+    // Edit-profile form data (web endpoint, logged-in user only)
+    async () => {
+      const data = await igFetch("https://www.instagram.com/api/v1/accounts/edit/web_form_data/");
+      const f = data?.form_data;
+      return f?.username ? [meFromUserObject({ username: f.username, full_name: f.first_name }, userId), true] : null;
+    },
+    // Old user info endpoint (fails with "useragent mismatch" on many web sessions)
+    async () => {
+      if (!userId) return null;
+      const data = await igFetch(`https://www.instagram.com/api/v1/users/${userId}/info/`);
+      return [meFromUserObject(data?.user, userId), true];
+    },
+    // Profile GraphQL query by id
+    async () => (userId ? [await fetchProfileByIdGraphql(userId), true] : null),
+    // Avatar link in Instagram's navigation
+    async () => {
+      const name = scrapeUsernameFromNav();
+      return name ? [{ id: "", username: name }, false] : null;
+    },
+    // Profile URL of the current tab
+    async () => {
+      const m = location.pathname.match(/^\/([A-Za-z0-9._]+)\/?$/);
+      return m && isIgUsername(m[1]) ? [{ id: "", username: m[1] }, false] : null;
+    },
+  ];
+
+  const tried = new Set();
+  for (const [i, source] of sources.entries()) {
+    const hit = await attempt(`source ${i + 1}`, source);
+    if (!hit || !hit[0]?.username) continue;
+    const key = hit[0].username.toLowerCase();
+    if (tried.has(key) && !hit[1]) continue;
+    tried.add(key);
+    const me = await resolve(hit[0], hit[1]);
+    if (me?.id) return me;
   }
 
+  // Logged-in id but Instagram would not reveal the username: lists still work by id.
+  if (userId) {
+    if (errors.length) console.warn("[Follow Checker] username lookup failed:", errors);
+    return {
+      id: userId,
+      username: "",
+      fullName: "",
+      profilePic: "",
+      followersCount: null,
+      followingCount: null,
+    };
+  }
+
+  if (errors.length) console.warn("[Follow Checker] account detection failed:", errors);
   throw new Error(
-    "Could not detect your account. Open instagram.com, log in, and stay on that page."
+    "Could not detect your account. Reload instagram.com while logged in, open your profile once, then try again."
   );
 }
 

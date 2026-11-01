@@ -36,6 +36,7 @@ const required = [
   "manifest.json",
   "content.js",
   "ig-bridge.js",
+  "background.js",
   "fc-shared.js",
   "github.js",
   "bluesky.js",
@@ -79,6 +80,9 @@ if (manifest) {
       if (!exists(file)) fail(`Icon ${size} missing: ${file}`);
     }
   }
+
+  const sw = manifest.background?.service_worker;
+  if (sw && !exists(sw)) fail(`background service_worker missing: ${sw}`);
 
   for (const cs of manifest.content_scripts || []) {
     for (const js of cs.js || []) {

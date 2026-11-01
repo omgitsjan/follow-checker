@@ -18,6 +18,7 @@ const files = [
   "manifest.json",
   "content.js",
   "ig-bridge.js",
+  "background.js",
   "fc-shared.js",
   "github.js",
   "bluesky.js",
