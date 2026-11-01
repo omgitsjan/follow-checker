@@ -35,6 +35,11 @@ function readJson(rel) {
 const required = [
   "manifest.json",
   "content.js",
+  "ig-bridge.js",
+  "fc-shared.js",
+  "github.js",
+  "bluesky.js",
+  "platforms.js",
   "popup.html",
   "popup.js",
   "popup.css",

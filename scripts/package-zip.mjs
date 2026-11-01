@@ -17,6 +17,11 @@ const stage = path.join(root, "_release_stage");
 const files = [
   "manifest.json",
   "content.js",
+  "ig-bridge.js",
+  "fc-shared.js",
+  "github.js",
+  "bluesky.js",
+  "platforms.js",
   "popup.html",
   "popup.js",
   "popup.css",

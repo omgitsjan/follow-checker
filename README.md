@@ -3,7 +3,7 @@
 [![CI](https://github.com/omgitsjan/instagram-follow-checker/actions/workflows/ci.yml/badge.svg)](https://github.com/omgitsjan/instagram-follow-checker/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-Chrome extension (**Manifest V3**, **v1.3**) for follow relationships, local analytics, and bot heuristics on the Instagram website — all via **your existing browser session**. No official API, no paywall, no backend.
+Chrome extension (**Manifest V3**, **v1.4**) for follow relationships, local analytics, and bot heuristics. It reads the account already open in your browser on **Instagram**, **GitHub**, or **Bluesky**. No paywall, no backend.
 
 **Unofficial.** Not affiliated with, endorsed by, or sponsored by Meta or related companies.
 
@@ -13,7 +13,7 @@ Chrome extension (**Manifest V3**, **v1.3**) for follow relationships, local ana
 | **Analytics** | Doughnut charts from your list buckets (mutual / not back / not you) |
 | **Bots** | Heuristic “maybe bot” list (≥25 signals) with unfollow/remove actions |
 | **Posts** / **Admire** | Roadmap / coming soon |
-| **Settings** | Language EN/DE, open source, tip |
+| **Settings** | Language EN/DE, safe or direct unfollow, open source, tip |
 
 > **Vibe-coded.** Built exploratively with AI — not production/enterprise software. Expect rough edges, website breaking changes, and no support guarantee.
 
@@ -70,7 +70,9 @@ This repo is **not** advice to circumvent ToS. You are responsible for complying
 - **Analytics:** pie/doughnut charts from list buckets  
 - **Bots:** local heuristics with unfollow / remove-follower style actions where available  
 - Profile pictures (with fallback via the open website tab)  
-- **Unfollow** / **Follow** from relationship lists  
+- **Safe unfollow** (default): opens the profile so you unfollow yourself. **Direct** (Instagram only, off by default) sends the unfollow from the extension  
+- **GitHub** and **Bluesky** lists, same mutual / not-back / you-don’t-follow view  
+- **Follow** on Instagram from relationship lists  
 - Search and JSON export  
 - Last result cached locally in the browser  
 - **English** default UI + **German** in Settings  
@@ -98,7 +100,7 @@ Relationship data is processed **locally in your browser**. Analysis results are
 2. Unzip  
 3. Chrome → `chrome://extensions` → **Developer mode** → **Load unpacked**  
 4. Select the **unzipped folder**  
-5. Open [instagram.com](https://www.instagram.com) (logged in) → extension icon → **Start analysis**
+5. Open [instagram.com](https://www.instagram.com), [github.com](https://github.com), or [bsky.app](https://bsky.app) (logged in) → extension icon → **Start analysis**
 
 ### Option B – From the repo
 
@@ -117,12 +119,12 @@ node scripts/package-zip.mjs
 
 ## Usage
 
-1. Stay logged in on instagram.com (tab open).  
+1. Stay logged in on Instagram, GitHub, or Bluesky (that tab open).  
 2. Start analysis and wait (large accounts take longer; requests are paced).  
 3. Use **Relationships** for tiles/tabs; **Analytics** for charts; **Bots** for heuristic flags.  
-4. Optionally follow/unfollow; use search or export.  
+4. **Settings → Unfollow → Safe** (default) opens the person’s page. Unfollow there yourself, then tap **Done** to update the list locally. **Direct** sends the unfollow only on Instagram.  
 5. **Settings** → language EN/DE, GitHub, tip.  
-6. On errors (429, login): wait, reload, try again.  
+6. On errors (429, login, empty list): reload the site tab, wait, try again.  
 
 ---
 
@@ -130,8 +132,10 @@ node scripts/package-zip.mjs
 
 | File | Role |
 |------|------|
-| `manifest.json` | MV3, instagram.com + CDN host permissions |
-| `content.js` | Runs on `instagram.com`, lists, follow/unfollow |
+| `manifest.json` | MV3, host permissions for Instagram, GitHub, Bluesky |
+| `content.js` / `ig-bridge.js` | Instagram session: lists, optional direct follow/unfollow |
+| `github.js` / `bluesky.js` | Lists for those sites. Unfollow always opens the profile |
+| `platforms.js` | Which open tab the popup talks to |
 | `popup.*` | UI: sections, tiles, charts, bots, settings |
 | `analytics.js` | Doughnut/pie charts from list buckets |
 | `i18n.js` | English + German strings |
@@ -166,6 +170,11 @@ Local checks:
 ```bash
 node scripts/validate-extension.mjs
 node --check content.js
+node --check ig-bridge.js
+node --check fc-shared.js
+node --check github.js
+node --check bluesky.js
+node --check platforms.js
 node --check popup.js
 node --check analytics.js
 node --check i18n.js

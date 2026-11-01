@@ -26,7 +26,7 @@ const I18N = {
     tipModalContinue: "Continue anyway",
     postsReloadHint: "Reload the instagram.com tab, then try again.",
     statusIdle:
-      "Open <strong>instagram.com</strong> (logged in) and start the analysis.",
+      "Open <strong>Instagram</strong>, <strong>GitHub</strong>, or <strong>Bluesky</strong> (logged in) and start the analysis.",
     following: "Following",
     followers: "Followers",
     mutual: "Mutual",
@@ -39,7 +39,7 @@ const I18N = {
     export: "Export",
     exportTitle: "Export as JSON",
     footer:
-      "Unofficial. Profile pics & follow/unfollow use your browser session. No external servers. Private accounts → “Requested” instead of instant follow.",
+      "Unofficial. Lists use your logged-in session. Safe unfollow only opens the profile. No external servers.",
     private: "private",
     unfollow: "Unfollow",
     follow: "Follow",
@@ -47,7 +47,7 @@ const I18N = {
     openProfile: "Open profile: @{user}",
     unfollowUser: "Unfollow @{user}",
     followUser: "Follow @{user}",
-    noIgTab: "No instagram.com tab open. Keep that tab open.",
+    noIgTab: "No supported tab open. Keep Instagram, GitHub, or Bluesky open.",
     actionFailed: "Action failed",
     followRequestSent: "Follow request sent to <strong>@{user}</strong>.",
     unfollowed: "Unfollowed <strong>@{user}</strong>.",
@@ -55,7 +55,7 @@ const I18N = {
     noSearchResults: "No matches for your search.",
     emptyList: "No entries in this list.",
     openIgFirst:
-      "Please open a tab with <strong>instagram.com</strong> and stay on it.",
+      "Open a tab with <strong>Instagram</strong>, <strong>GitHub</strong>, or <strong>Bluesky</strong> and stay logged in.",
     loading: "Loading…",
     unknownError: "Unknown error",
     doneSummary:
@@ -138,6 +138,22 @@ const I18N = {
     removeFollower: "Remove",
     removeFollowerUser: "Remove @{user} from your followers",
     followerRemoved: "Removed <strong>@{user}</strong> from your followers.",
+    unfollowMode: "Unfollow",
+    unfollowSafe: "Safe",
+    unfollowDirect: "Direct",
+    unfollowSafeHelp:
+      "Opens the profile. You unfollow there yourself. The site only sees a normal visit, not an unfollow request from this extension.",
+    unfollowDirectHelp:
+      "The extension unfollows through the site. That is the action that can look like a bot and get the account limited. Instagram only — GitHub and Bluesky always open the profile.",
+    openToUnfollow: "Open",
+    markUnfollowed: "Done",
+    markRemoved: "Done",
+    markUnfollowedHint: "Unfollowed @{user} yourself? Tap to update this list locally.",
+    openedToUnfollow:
+      "Opened <strong>@{user}</strong>. Unfollow them on the page, then tap Done.",
+    openedToRemove:
+      "Opened <strong>@{user}</strong>. Remove them on the page, then tap Done.",
+    reloadTab: "Reload that tab, then start the analysis again.",
   },
   de: {
     appTitle: "Follow Checker",
@@ -162,7 +178,7 @@ const I18N = {
     tipModalContinue: "Trotzdem fortfahren",
     postsReloadHint: "instagram.com-Tab neu laden und erneut versuchen.",
     statusIdle:
-      "Öffne <strong>instagram.com</strong> (eingeloggt) und starte die Analyse.",
+      "Öffne <strong>Instagram</strong>, <strong>GitHub</strong> oder <strong>Bluesky</strong> (eingeloggt) und starte die Analyse.",
     following: "Following",
     followers: "Follower",
     mutual: "Gegenseitig",
@@ -175,7 +191,7 @@ const I18N = {
     export: "Export",
     exportTitle: "Als JSON exportieren",
     footer:
-      "Inoffiziell. Profilbilder & Follow/Entfolgen über deine Browser-Session. Keine externen Server. Privat-Accounts → „Angefragt“ statt sofort Follow.",
+      "Inoffiziell. Listen über deine eingeloggte Session. Safe-Entfolgen öffnet nur das Profil. Keine externen Server.",
     private: "privat",
     unfollow: "Entfolgen",
     follow: "Folgen",
@@ -183,7 +199,7 @@ const I18N = {
     openProfile: "Profil öffnen: @{user}",
     unfollowUser: "@{user} entfolgen",
     followUser: "@{user} folgen",
-    noIgTab: "Kein instagram.com-Tab offen. Bitte den Tab aktiv lassen.",
+    noIgTab: "Kein passender Tab offen. Instagram, GitHub oder Bluesky offen lassen.",
     actionFailed: "Aktion fehlgeschlagen",
     followRequestSent:
       "Follow-Anfrage an <strong>@{user}</strong> gesendet.",
@@ -192,7 +208,7 @@ const I18N = {
     noSearchResults: "Keine Treffer für die Suche.",
     emptyList: "Keine Einträge in dieser Liste.",
     openIgFirst:
-      "Bitte öffne zuerst einen Tab mit <strong>instagram.com</strong> und bleibe dort.",
+      "Öffne einen Tab mit <strong>Instagram</strong>, <strong>GitHub</strong> oder <strong>Bluesky</strong> und bleib eingeloggt.",
     loading: "Lädt…",
     unknownError: "Unbekannter Fehler",
     doneSummary:
@@ -276,6 +292,22 @@ const I18N = {
     removeFollower: "Entfernen",
     removeFollowerUser: "@{user} aus deinen Followern entfernen",
     followerRemoved: "<strong>@{user}</strong> folgt dir nicht mehr (entfernt).",
+    unfollowMode: "Entfolgen",
+    unfollowSafe: "Safe",
+    unfollowDirect: "Direkt",
+    unfollowSafeHelp:
+      "Öffnet das Profil. Du entfolgst selbst auf der Seite. Die Plattform sieht nur einen normalen Besuch, keinen Entfolgen-Request der Erweiterung.",
+    unfollowDirectHelp:
+      "Die Erweiterung entfolgt direkt über die Website. Das kann wie ein Bot wirken und den Account einschränken. Nur Instagram. GitHub und Bluesky öffnen immer das Profil.",
+    openToUnfollow: "Öffnen",
+    markUnfollowed: "Erledigt",
+    markRemoved: "Erledigt",
+    markUnfollowedHint: "Du hast @{user} selbst entfolgt? Tippen aktualisiert nur diese Liste.",
+    openedToUnfollow:
+      "Profil von <strong>@{user}</strong> geöffnet. Entfolge dort selbst, dann tippe auf Erledigt.",
+    openedToRemove:
+      "Profil von <strong>@{user}</strong> geöffnet. Entferne die Person dort selbst, dann tippe auf Erledigt.",
+    reloadTab: "Diesen Tab neu laden und die Analyse erneut starten.",
   },
 };
 

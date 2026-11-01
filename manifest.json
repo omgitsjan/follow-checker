@@ -1,13 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Follow Checker",
-  "version": "1.3.0",
-  "description": "Relationships, charts & bot signals. Session-only, unofficial, no official API.",
+  "version": "1.4.0",
+  "description": "Follow relationships on Instagram, GitHub, and Bluesky. Session-only, unofficial.",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
     "https://www.instagram.com/*",
     "https://*.cdninstagram.com/*",
-    "https://*.fbcdn.net/*"
+    "https://*.fbcdn.net/*",
+    "https://github.com/*",
+    "https://api.github.com/*",
+    "https://bsky.app/*",
+    "https://public.api.bsky.app/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -26,7 +30,23 @@
   "content_scripts": [
     {
       "matches": ["https://www.instagram.com/*"],
+      "js": ["ig-bridge.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://github.com/*"],
+      "js": ["fc-shared.js", "github.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://bsky.app/*"],
+      "js": ["fc-shared.js", "bluesky.js"],
       "run_at": "document_idle"
     }
   ]

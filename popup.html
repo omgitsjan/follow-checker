@@ -104,6 +104,19 @@
           </div>
 
           <div class="settings-block">
+            <span class="settings-label" data-i18n="unfollowMode">Unfollow</span>
+            <div class="lang-switch" role="group" data-i18n-title="unfollowMode" title="Unfollow">
+              <button type="button" class="mode-btn active" data-unfollow-mode="safe" id="unfollowSafe">
+                <span data-i18n="unfollowSafe">Safe</span>
+              </button>
+              <button type="button" class="mode-btn" data-unfollow-mode="direct" id="unfollowDirect">
+                <span data-i18n="unfollowDirect">Direct</span>
+              </button>
+            </div>
+            <p class="settings-help" id="unfollowModeHelp"></p>
+          </div>
+
+          <div class="settings-block">
             <a
               id="repoLink"
               class="settings-link"
@@ -337,6 +350,7 @@
 
     <script src="i18n.js"></script>
     <script src="analytics.js"></script>
+    <script src="platforms.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

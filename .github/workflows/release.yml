@@ -26,6 +26,11 @@ jobs:
         run: |
           node scripts/validate-extension.mjs
           node --check content.js
+          node --check ig-bridge.js
+          node --check fc-shared.js
+          node --check github.js
+          node --check bluesky.js
+          node --check platforms.js
           node --check popup.js
           node --check i18n.js
           node --check analytics.js
@@ -48,6 +53,11 @@ jobs:
           zip -r "$ZIP" \
             manifest.json \
             content.js \
+            ig-bridge.js \
+            fc-shared.js \
+            github.js \
+            bluesky.js \
+            platforms.js \
             popup.html \
             popup.js \
             popup.css \

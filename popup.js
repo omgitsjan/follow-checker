@@ -42,7 +42,48 @@ const state = {
   analysisRuns: 0,
   postsLoads: 0,
   analysisRunning: false,
+  platformId: "instagram",
+  resultPlatform: null,
+  unfollowMode: "safe",
+  pendingManual: {},
 };
+
+function platformById(id) {
+  const list = typeof PLATFORMS !== "undefined" ? PLATFORMS : [];
+  return list.find((p) => p.id === id) || list[0] || null;
+}
+
+function currentPlatform() {
+  return platformById(state.platformId);
+}
+
+function profileUrlFor(username) {
+  const platform = currentPlatform();
+  if (platform?.profileUrl) return platform.profileUrl(username);
+  return `https://www.instagram.com/${encodeURIComponent(username)}/`;
+}
+
+function safeUnfollowActive() {
+  const platform = currentPlatform();
+  if (!platform?.supportsDirectUnfollow) return true;
+  return state.unfollowMode !== "direct";
+}
+
+function pendingKey(userId) {
+  return `${state.resultPlatform || state.platformId || "instagram"}:${userId}`;
+}
+
+function rememberPending(userId, action) {
+  state.pendingManual[pendingKey(userId)] = action;
+  chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
+}
+
+function forgetPending(userId) {
+  const key = pendingKey(userId);
+  if (!state.pendingManual[key]) return;
+  delete state.pendingManual[key];
+  chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
+}
 
 const BOT_SCORE_MIN = 25;
 const tipModal = $("tipModal");
@@ -110,6 +151,7 @@ function applyStaticI18n() {
   if (!state.me?.username) {
     accountLine.textContent = t("tagline");
   }
+  if (typeof applyUnfollowModeUi === "function") applyUnfollowModeUi();
 
   // Re-render dynamic lists so button labels update
   if (state.counts) {
@@ -370,7 +412,7 @@ function renderBots() {
 
     const link = document.createElement("a");
     link.className = "user-link";
-    link.href = `https://www.instagram.com/${encodeURIComponent(u.username)}/`;
+    link.href = profileUrlFor(u.username);
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.appendChild(buildAvatar(u));
@@ -405,8 +447,19 @@ function renderBots() {
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.className = "btn action remove-follower";
-    removeBtn.textContent = t("removeFollower");
-    removeBtn.title = t("removeFollowerUser", { user: u.username });
+    const manual = safeUnfollowActive();
+    const removePending = manual && state.pendingManual[pendingKey(u.id)] === "remove_follower";
+    removeBtn.textContent = removePending
+      ? t("markRemoved")
+      : manual
+        ? t("openToUnfollow")
+        : t("removeFollower");
+    if (removePending) removeBtn.dataset.opened = "1";
+    removeBtn.title = removePending
+      ? t("markUnfollowedHint", { user: u.username })
+      : manual
+        ? t("openProfile", { user: u.username })
+        : t("removeFollowerUser", { user: u.username });
     removeBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -419,8 +472,18 @@ function renderBots() {
       const unf = document.createElement("button");
       unf.type = "button";
       unf.className = "btn action unfollow";
-      unf.textContent = t("unfollow");
-      unf.title = t("unfollowUser", { user: u.username });
+      const unfollowPending = manual && state.pendingManual[pendingKey(u.id)] === "unfollow";
+      unf.textContent = unfollowPending
+        ? t("markUnfollowed")
+        : manual
+          ? t("openToUnfollow")
+          : t("unfollow");
+      if (unfollowPending) unf.dataset.opened = "1";
+      unf.title = unfollowPending
+        ? t("markUnfollowedHint", { user: u.username })
+        : manual
+          ? t("openProfile", { user: u.username })
+          : t("unfollowUser", { user: u.username });
       unf.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -630,7 +693,7 @@ function userCard(u, listKey) {
 
   const link = document.createElement("a");
   link.className = "user-link";
-  link.href = `https://www.instagram.com/${encodeURIComponent(u.username)}/`;
+  link.href = profileUrlFor(u.username);
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   link.title = t("openProfile", { user: u.username });
@@ -666,8 +729,19 @@ function userCard(u, listKey) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "btn action unfollow";
-    btn.textContent = t("unfollow");
-    btn.title = t("unfollowUser", { user: u.username });
+    const manualUnfollow = safeUnfollowActive();
+    const unfollowPending = manualUnfollow && state.pendingManual[pendingKey(u.id)] === "unfollow";
+    btn.textContent = unfollowPending
+      ? t("markUnfollowed")
+      : manualUnfollow
+        ? t("openToUnfollow")
+        : t("unfollow");
+    if (unfollowPending) btn.dataset.opened = "1";
+    btn.title = unfollowPending
+      ? t("markUnfollowedHint", { user: u.username })
+      : manualUnfollow
+        ? t("openProfile", { user: u.username })
+        : t("unfollowUser", { user: u.username });
     btn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -694,8 +768,98 @@ function userCard(u, listKey) {
   return row;
 }
 
+function commitRemoveFollower(u, row) {
+  forgetPending(u.id);
+  removeUserFromLists(u.id, ["followers", "mutual", "notMe", "notFollowedByMe"]);
+  if (state.following.some((x) => x.id === u.id)) {
+    if (!state.notFollowingBack.some((x) => x.id === u.id)) {
+      state.notFollowingBack.push(u);
+      state.notFollowingBack.sort((a, b) =>
+        a.username.localeCompare(b.username, undefined, { sensitivity: "base" })
+      );
+    }
+  }
+  if (state.counts) {
+    state.counts.followers = state.followers.length;
+    state.counts.mutual = state.mutual.length;
+    state.counts.notFollowedByMe = state.notFollowedByMe.length;
+    state.counts.notFollowingBack = state.notFollowingBack.length;
+  }
+  setStatus(t("followerRemoved", { user: escapeHtml(u.username) }), "ok");
+  row.classList.add("removing");
+  setTimeout(() => {
+    row.remove();
+    refreshPanelsAfterAction();
+  }, 180);
+  updateBadgesAndStats();
+  persistState();
+}
+
+function commitUnfollow(u, listKey, row) {
+  forgetPending(u.id);
+  removeUserFromLists(u.id, ["following", "mutual", "notBack"]);
+  if (state.counts) {
+    state.counts.following = state.following.length;
+    state.counts.mutual = state.mutual.length;
+    state.counts.notFollowingBack = state.notFollowingBack.length;
+    if (state.followers.some((x) => x.id === u.id)) {
+      if (!state.notFollowedByMe.some((x) => x.id === u.id)) {
+        state.notFollowedByMe.push(u);
+        state.notFollowedByMe.sort((a, b) =>
+          a.username.localeCompare(b.username, undefined, { sensitivity: "base" })
+        );
+      }
+      state.counts.notFollowedByMe = state.notFollowedByMe.length;
+    }
+  }
+  setStatus(t("unfollowed", { user: escapeHtml(u.username) }), "ok");
+  if (listKey === "bots") {
+    updateBadgesAndStats();
+    persistState();
+    renderBots();
+    return;
+  }
+  row.classList.add("removing");
+  setTimeout(() => {
+    row.remove();
+    refreshPanelsAfterAction();
+  }, 180);
+  updateBadgesAndStats();
+  persistState();
+}
+
 async function handleFriendship(u, action, listKey, btn, row) {
   if (btn.disabled) return;
+  const manual =
+    (action === "unfollow" || action === "remove_follower") && safeUnfollowActive();
+  if (manual) {
+    try {
+      if (btn.dataset.opened === "1" || state.pendingManual[pendingKey(u.id)] === action) {
+        btn.disabled = true;
+        if (action === "remove_follower") commitRemoveFollower(u, row);
+        else commitUnfollow(u, listKey, row);
+        return;
+      }
+      btn.disabled = true;
+      rememberPending(u.id, action);
+      await chrome.tabs.create({ url: profileUrlFor(u.username), active: true });
+      btn.disabled = false;
+      btn.dataset.opened = "1";
+      btn.textContent = action === "remove_follower" ? t("markRemoved") : t("markUnfollowed");
+      btn.title = t("markUnfollowedHint", { user: u.username });
+      setStatus(
+        t(action === "remove_follower" ? "openedToRemove" : "openedToUnfollow", {
+          user: escapeHtml(u.username),
+        }),
+        "ok"
+      );
+    } catch (err) {
+      btn.disabled = false;
+      setStatus(escapeHtml(err?.message || String(err)), "error");
+    }
+    return;
+  }
+
   const label = btn.textContent;
   btn.disabled = true;
   btn.textContent = "…";
@@ -733,65 +897,16 @@ async function handleFriendship(u, action, listKey, btn, row) {
     }
 
     if (action === "remove_follower") {
-      // They no longer follow you
-      removeUserFromLists(u.id, ["followers", "mutual", "notMe", "notFollowedByMe"]);
-      // If you still follow them → not following back
-      if (state.following.some((x) => x.id === u.id)) {
-        if (!state.notFollowingBack.some((x) => x.id === u.id)) {
-          state.notFollowingBack.push(u);
-          state.notFollowingBack.sort((a, b) =>
-            a.username.localeCompare(b.username, undefined, {
-              sensitivity: "base",
-            })
-          );
-        }
-      }
-      if (state.counts) {
-        state.counts.followers = state.followers.length;
-        state.counts.mutual = state.mutual.length;
-        state.counts.notFollowedByMe = state.notFollowedByMe.length;
-        state.counts.notFollowingBack = state.notFollowingBack.length;
-      }
-      setStatus(t("followerRemoved", { user: escapeHtml(u.username) }), "ok");
-      row.classList.add("removing");
-      setTimeout(() => {
-        row.remove();
-        refreshPanelsAfterAction();
-      }, 180);
-      updateBadgesAndStats();
-      persistState();
+      commitRemoveFollower(u, row);
       return;
     }
 
     if (action === "unfollow") {
-      // Remove from following-related lists; keep on followers if they still follow
-      removeUserFromLists(u.id, ["following", "mutual", "notBack"]);
-      if (state.counts) {
-        state.counts.following = state.following.length;
-        state.counts.mutual = state.mutual.length;
-        state.counts.notFollowingBack = state.notFollowingBack.length;
-        // if they follow you, they belong in notFollowedByMe now
-        if (state.followers.some((x) => x.id === u.id)) {
-          if (!state.notFollowedByMe.some((x) => x.id === u.id)) {
-            state.notFollowedByMe.push(u);
-            state.notFollowedByMe.sort((a, b) =>
-              a.username.localeCompare(b.username, undefined, {
-                sensitivity: "base",
-              })
-            );
-          }
-          state.counts.notFollowedByMe = state.notFollowedByMe.length;
-        }
-      }
-      setStatus(t("unfollowed", { user: escapeHtml(u.username) }), "ok");
-      // From bots list: stay visible (still a follower) but drop unfollow control
-      if (listKey === "bots") {
-        updateBadgesAndStats();
-        persistState();
-        renderBots();
-        return;
-      }
-    } else {
+      commitUnfollow(u, listKey, row);
+      return;
+    }
+
+    {
       // follow: add to following; if they follow you → mutual, else notBack
       if (!state.following.some((x) => x.id === u.id)) {
         state.following.push(u);
@@ -898,6 +1013,7 @@ async function persistState() {
   const result = {
     type: "RESULT",
     ok: true,
+    platform: state.resultPlatform || state.platformId,
     me: state.me,
     counts: state.counts,
     following: state.following,
@@ -980,29 +1096,44 @@ function switchTab(name, { force = false } = {}) {
   }
 }
 
+function platformForUrl(url) {
+  const list = typeof PLATFORMS !== "undefined" ? PLATFORMS : [];
+  return list.find((p) => p.match(url || "")) || null;
+}
+
 async function getIgTab() {
   const tabsFound = await chrome.tabs.query({
     active: true,
     currentWindow: true,
   });
-  const tab = tabsFound[0];
-  if (!tab?.id || !tab.url?.includes("instagram.com")) {
-    const all = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
-    if (all[0]?.id) {
-      state.igTabId = all[0].id;
-      return all[0];
-    }
-    throw new Error(t("openIgFirst"));
+  const active = tabsFound[0];
+  const activePlatform = platformForUrl(active?.url);
+  if (active?.id && activePlatform) {
+    state.igTabId = active.id;
+    state.platformId = activePlatform.id;
+    return active;
   }
-  state.igTabId = tab.id;
-  return tab;
+  const list = typeof PLATFORMS !== "undefined" ? PLATFORMS : [];
+  for (const platform of list) {
+    const found = await chrome.tabs.query({ url: platform.queries });
+    if (found[0]?.id) {
+      state.igTabId = found[0].id;
+      state.platformId = platform.id;
+      return found[0];
+    }
+  }
+  throw new Error(t("openIgFirst"));
 }
 
 async function resolveIgTabId() {
   if (state.igTabId) {
     try {
       const tTab = await chrome.tabs.get(state.igTabId);
-      if (tTab?.url?.includes("instagram.com")) return state.igTabId;
+      const platform = platformForUrl(tTab?.url);
+      if (platform) {
+        state.platformId = platform.id;
+        return state.igTabId;
+      }
     } catch {
       state.igTabId = null;
     }
@@ -1016,16 +1147,31 @@ async function resolveIgTabId() {
 }
 
 async function ensureContentScript(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const platform = platformForUrl(tab?.url);
+  if (!platform) throw new Error(t("openIgFirst"));
+  state.platformId = platform.id;
   try {
     const res = await chrome.tabs.sendMessage(tabId, { type: "PING" });
-    if (res?.ok) return;
+    if (res?.ok && res.platform === platform.id) return;
   } catch {
     /* inject */
   }
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["content.js"],
-  });
+  if (platform.bridge) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [platform.bridge],
+      world: "MAIN",
+    });
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: platform.shared ? ["fc-shared.js", platform.script] : [platform.script],
+    });
+  } catch {
+    throw new Error(t("reloadTab"));
+  }
 }
 
 function formatProgress(msg) {
@@ -1136,6 +1282,8 @@ function onResult(msg, { keepTab = false } = {}) {
     return;
   }
 
+  if (msg.platform) state.platformId = msg.platform;
+  state.resultPlatform = msg.platform || state.platformId;
   state.me = msg.me;
   state.following = msg.following || [];
   state.followers = msg.followers || [];
@@ -1212,6 +1360,32 @@ function syncSettingsToggleUi(open) {
   }
 }
 
+function applyUnfollowModeUi() {
+  document.querySelectorAll("[data-unfollow-mode]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.unfollowMode === state.unfollowMode);
+  });
+  const help = $("unfollowModeHelp");
+  if (help) {
+    help.textContent =
+      state.unfollowMode === "direct" ? t("unfollowDirectHelp") : t("unfollowSafeHelp");
+  }
+}
+
+async function setUnfollowMode(mode) {
+  if (mode !== "safe" && mode !== "direct") return;
+  state.unfollowMode = mode;
+  try {
+    await chrome.storage.local.set({ unfollowMode: mode });
+  } catch {
+    /* ignore */
+  }
+  applyUnfollowModeUi();
+  if (state.counts) {
+    renderAll();
+    renderBots();
+  }
+}
+
 function openSettings() {
   // Full-page settings under fixed header; gear becomes ×
   if (appMain) show(appMain, false);
@@ -1234,6 +1408,10 @@ document.querySelectorAll(".lang-btn").forEach((btn) => {
   btn.addEventListener("click", () => setLanguage(btn.dataset.lang));
 });
 
+document.querySelectorAll("[data-unfollow-mode]").forEach((btn) => {
+  btn.addEventListener("click", () => setUnfollowMode(btn.dataset.unfollowMode));
+});
+
 /* ---------- messaging / init ---------- */
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -1246,6 +1424,8 @@ async function init() {
     "lang",
     "lastResult",
     "lastLiked",
+    "unfollowMode",
+    "pendingManual",
   ]);
   // Drop leftover Impersonator keys from older builds
   try {
@@ -1260,10 +1440,17 @@ async function init() {
   if (stored.lang && I18N[stored.lang]) {
     state.lang = stored.lang;
   }
+  if (stored.unfollowMode === "direct" || stored.unfollowMode === "safe") {
+    state.unfollowMode = stored.unfollowMode;
+  }
+  if (stored.pendingManual && typeof stored.pendingManual === "object") {
+    state.pendingManual = stored.pendingManual;
+  }
   applyStaticI18n();
   show(sectionNav, true);
 
   if (stored.lastResult?.ok && !stored.lastResult.impersonating) {
+    if (stored.lastResult.platform) state.resultPlatform = stored.lastResult.platform;
     onResult(stored.lastResult, { keepTab: true });
     if (stored.lastResult.finishedAt) {
       const agoMin = Math.round(
@@ -1290,6 +1477,17 @@ async function loadHeaderAccount() {
     await ensureContentScript(tabId);
     const res = await chrome.tabs.sendMessage(tabId, { type: "GET_ME" });
     if (res?.ok && res.me) {
+      if (
+        state.resultPlatform &&
+        state.platformId &&
+        state.resultPlatform !== state.platformId
+      ) {
+        const label = currentPlatform()?.label || "";
+        accountLine.textContent = label
+          ? `@${res.me.username} · ${label}`
+          : `@${res.me.username}`;
+        return;
+      }
       state.me = { ...(state.me || {}), ...res.me };
       refreshHeaderDisplay();
     }
@@ -1318,10 +1516,7 @@ async function runGlobalAnalysis() {
 
   try {
     const tab = await getIgTab();
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content.js"],
-    });
+    await ensureContentScript(tab.id);
     const res = await chrome.tabs.sendMessage(tab.id, { type: "ANALYZE" });
     if (!res?.started && res?.error) {
       throw new Error(res.error);

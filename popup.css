@@ -256,7 +256,8 @@ body {
   gap: 6px;
 }
 
-.lang-btn {
+.lang-btn,
+.mode-btn {
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--muted);
@@ -287,11 +288,13 @@ body {
   display: block;
 }
 
-.lang-btn:hover {
+.lang-btn:hover,
+.mode-btn:hover {
   color: var(--text);
 }
 
-.lang-btn.active {
+.lang-btn.active,
+.mode-btn.active {
   color: var(--text);
   border-color: #6b4d7a;
   background: linear-gradient(180deg, #2a1f33, var(--surface-2));

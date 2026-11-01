@@ -7,6 +7,9 @@ const IG_APP_ID = "936619743392459";
 const PAGE_SIZE = 50;
 const DELAY_MS = 900; // Pause zwischen Seiten, um Rate-Limits zu vermeiden
 
+let igWwwClaim = "";
+let igBridgeState = "unknown";
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -16,14 +19,120 @@ function getCookie(name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+/** App id / ASBD / claim from the page Instagram already rendered. */
+function scrapeIgBootstrap() {
+  const found = { appId: "", asbd: "", claim: "", lsd: "" };
+  const scripts = document.querySelectorAll("script:not([src])");
+  for (const script of scripts) {
+    const text = script.textContent || "";
+    if (text.length < 20) continue;
+    if (!found.appId) {
+      const match = text.match(/"(?:APP_ID|X-IG-App-ID|appId)"\s*:\s*"(\d{6,})"/);
+      if (match) found.appId = match[1];
+    }
+    if (!found.asbd) {
+      const match = text.match(/"(?:ASBD_ID|asbdId|asbd_id)"\s*:\s*"?(\d{4,})"?/);
+      if (match) found.asbd = match[1];
+    }
+    if (!found.claim) {
+      const match = text.match(/"www_claim"\s*:\s*"([^"]+)"/);
+      if (match) found.claim = match[1];
+    }
+    if (!found.lsd) {
+      const match = text.match(/"LSD"\s*,\s*\[\]\s*,\s*\{\s*"token"\s*:\s*"([^"]+)"/);
+      if (match) found.lsd = match[1];
+    }
+    if (found.appId && found.asbd && found.claim && found.lsd) break;
+  }
+  return found;
+}
+
 function igHeaders() {
-  const csrf = getCookie("csrftoken") || "";
-  return {
-    "x-ig-app-id": IG_APP_ID,
+  const boot = scrapeIgBootstrap();
+  const headers = {
+    "x-ig-app-id": boot.appId || IG_APP_ID,
     "x-requested-with": "XMLHttpRequest",
-    "x-csrftoken": csrf,
-    Accept: "application/json",
+    "x-csrftoken": getCookie("csrftoken") || "",
+    Accept: "*/*",
   };
+  if (boot.asbd) headers["x-asbd-id"] = boot.asbd;
+  headers["x-ig-www-claim"] = igWwwClaim || boot.claim || "0";
+  if (boot.lsd) headers["x-fb-lsd"] = boot.lsd;
+  return headers;
+}
+
+function pageFetch(url, options) {
+  if (igBridgeState === "missing") {
+    return Promise.reject(new Error("bridge-missing"));
+  }
+  return new Promise((resolve, reject) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timer = setTimeout(() => {
+      window.removeEventListener("message", onMessage);
+      if (igBridgeState !== "ok") igBridgeState = "missing";
+      reject(new Error("bridge-missing"));
+    }, igBridgeState === "ok" ? 20000 : 1500);
+
+    function onMessage(event) {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== "fc-bridge" || data.id !== id) return;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      if (data.error) {
+        reject(new Error(data.error));
+        return;
+      }
+      igBridgeState = "ok";
+      resolve(data);
+    }
+
+    window.addEventListener("message", onMessage);
+    window.postMessage(
+      {
+        source: "fc-content",
+        type: "FC_FETCH",
+        id,
+        url,
+        method: options.method || "GET",
+        headers: options.headers || {},
+        body: options.body || null,
+      },
+      location.origin
+    );
+  });
+}
+
+function parseIgBody(status, text) {
+  const trimmed = String(text || "").replace(/^(\)\]\}'|for\s*\(;;\);)+/, "").trim();
+  if (/^<!DOCTYPE|^<html/i.test(trimmed)) {
+    throw new Error(
+      "Instagram returned a page instead of data. Reload instagram.com and make sure you are logged in."
+    );
+  }
+  if (status === 401 || status === 403) {
+    throw new Error("Not logged in or blocked. Log in on instagram.com and try again later.");
+  }
+  if (status === 429) {
+    throw new Error("Instagram rate-limited requests (429). Wait a few minutes and try again.");
+  }
+  let data;
+  try {
+    data = JSON.parse(trimmed);
+  } catch {
+    throw new Error(status ? `HTTP ${status}: non-JSON response` : "Instagram returned a non-JSON response.");
+  }
+  if (!status || status >= 400) {
+    const detail = data?.message ? String(data.message).slice(0, 160) : "";
+    throw new Error(detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`);
+  }
+  if (data?.status === "fail" || data?.require_login || data?.checkpoint_required) {
+    throw new Error(
+      data.message ||
+        "Instagram refused the request. Resolve any checkpoint in the tab, then try again."
+    );
+  }
+  return data;
 }
 
 async function igFetch(url, options = {}) {
@@ -33,47 +142,33 @@ async function igFetch(url, options = {}) {
     ...(options.headers || {}),
   };
 
-  const res = await fetch(url, {
-    method,
-    credentials: "include",
-    headers,
-    body: options.body,
-  });
-
-  if (res.status === 401 || res.status === 403) {
-    throw new Error(
-      "Not logged in or blocked. Please log in on instagram.com and try again later."
-    );
-  }
-  if (res.status === 429) {
-    throw new Error(
-      "The website rate-limited requests (429). Wait 1–2 minutes and try again."
-    );
-  }
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = (await res.text()).replace(/\s+/g, " ").slice(0, 160);
-    } catch {
-      /* ignore */
-    }
-    throw new Error(
-      detail
-        ? `HTTP ${res.status}: ${detail}`
-        : `The website responded with HTTP ${res.status}`
-    );
-  }
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    return res.json();
-  }
-  // Some endpoints return JSON without content-type
-  const text = await res.text();
+  let status;
+  let text;
+  let responseHeaders = {};
   try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error("The website returned a non-JSON response.");
+    const bridged = await pageFetch(url, { method, headers, body: options.body || null });
+    status = bridged.status;
+    text = bridged.text || "";
+    responseHeaders = bridged.headers || {};
+  } catch (err) {
+    if (err?.message !== "bridge-missing") throw err;
+    const res = await fetch(url, {
+      method,
+      credentials: "include",
+      headers,
+      body: options.body,
+      referrer: location.href,
+    });
+    status = res.status;
+    text = await res.text();
+    const claim = res.headers.get("x-ig-set-www-claim");
+    if (claim) responseHeaders["x-ig-set-www-claim"] = claim;
   }
+
+  if (responseHeaders["x-ig-set-www-claim"]) {
+    igWwwClaim = responseHeaders["x-ig-set-www-claim"];
+  }
+  return parseIgBody(status, text);
 }
 
 /** Follow / unfollow / remove follower via Instagram web endpoints */
@@ -608,37 +703,84 @@ async function analyzeOwnPostsWithFans(onProgress, options = {}) {
   };
 }
 
-async function fetchList(userId, type, onProgress) {
+function listPayload(data) {
+  if (Array.isArray(data?.users)) {
+    return {
+      users: data.users,
+      next: data.next_max_id ? String(data.next_max_id) : null,
+    };
+  }
+  const buckets = data?.data && typeof data.data === "object" ? Object.values(data.data) : [];
+  for (const node of buckets) {
+    if (node && Array.isArray(node.users)) {
+      return {
+        users: node.users,
+        next: node.next_max_id ? String(node.next_max_id) : null,
+      };
+    }
+  }
+  return { users: [], next: null };
+}
+
+async function fetchListPage(userId, type, maxId, variant, count) {
+  let url = `https://www.instagram.com/api/v1/friendships/${userId}/${type}/?count=${count}`;
+  if (variant === "surface") url += "&search_surface=follow_list_page";
+  if (maxId) url += `&max_id=${encodeURIComponent(maxId)}`;
+  return listPayload(await igFetch(url));
+}
+
+async function fetchList(userId, type, onProgress, expectedCount = null) {
   const results = [];
+  const seen = new Set();
   let maxId = null;
   let page = 0;
+  let variant = "plain";
+  const expected = Number(expectedCount);
+  const expectSome = Number.isFinite(expected) && expected > 0;
 
-  // type: "followers" | "following"
   do {
     page += 1;
-    let url = `https://www.instagram.com/api/v1/friendships/${userId}/${type}/?count=${PAGE_SIZE}`;
-    if (maxId) {
-      url += `&max_id=${encodeURIComponent(maxId)}`;
+    let payload;
+    try {
+      payload = await fetchListPage(userId, type, maxId, variant, PAGE_SIZE);
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (page === 1 && variant === "plain" && /HTTP 400|HTTP 404/.test(message)) {
+        variant = "surface";
+        payload = await fetchListPage(userId, type, maxId, variant, 25);
+      } else {
+        throw err;
+      }
     }
 
-    const data = await igFetch(url);
-    const users = (data.users || []).map(mapUser);
-    results.push(...users);
+    if (page === 1 && variant === "plain" && payload.users.length === 0 && expectSome) {
+      variant = "surface";
+      payload = await fetchListPage(userId, type, null, "surface", 25);
+    }
+
+    if (page === 1 && payload.users.length === 0 && expectSome) {
+      throw new Error(
+        `Instagram returned an empty ${type} list even though the profile count is ${expected}. Reload instagram.com while logged in, open your profile once, then start again.`
+      );
+    }
+
+    for (const user of payload.users.map(mapUser)) {
+      if (!user.id || seen.has(user.id)) continue;
+      seen.add(user.id);
+      results.push(user);
+    }
 
     if (onProgress) {
       onProgress({
         type,
         loaded: results.length,
         page,
-        hasMore: Boolean(data.next_max_id),
+        hasMore: Boolean(payload.next),
       });
     }
 
-    maxId = data.next_max_id || null;
-
-    // big_list false + no next_max_id = fertig
+    maxId = payload.next;
     if (!maxId) break;
-
     await sleep(DELAY_MS);
   } while (maxId);
 
@@ -776,7 +918,7 @@ let running = false;
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "PING") {
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, platform: "instagram" });
     return false;
   }
 
@@ -882,27 +1024,37 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           })
           .catch(() => {});
 
-        const following = await fetchList(me.id, "following", (p) => {
-          chrome.runtime
-            .sendMessage({
-              type: "PROGRESS",
-              stage: "following",
-              loaded: p.loaded,
-              total: me.followingCount,
-            })
-            .catch(() => {});
-        });
+        const following = await fetchList(
+          me.id,
+          "following",
+          (p) => {
+            chrome.runtime
+              .sendMessage({
+                type: "PROGRESS",
+                stage: "following",
+                loaded: p.loaded,
+                total: me.followingCount,
+              })
+              .catch(() => {});
+          },
+          me.followingCount
+        );
 
-        const followers = await fetchList(me.id, "followers", (p) => {
-          chrome.runtime
-            .sendMessage({
-              type: "PROGRESS",
-              stage: "followers",
-              loaded: p.loaded,
-              total: me.followersCount,
-            })
-            .catch(() => {});
-        });
+        const followers = await fetchList(
+          me.id,
+          "followers",
+          (p) => {
+            chrome.runtime
+              .sendMessage({
+                type: "PROGRESS",
+                stage: "followers",
+                loaded: p.loaded,
+                total: me.followersCount,
+              })
+              .catch(() => {});
+          },
+          me.followersCount
+        );
 
         // Light enrich for bots heuristics only (charts use list buckets, no counts needed)
         await enrichUsersWithCounts(
@@ -926,6 +1078,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const result = {
           type: "RESULT",
           ok: true,
+          platform: "instagram",
           me,
           counts: {
             following: following.length,

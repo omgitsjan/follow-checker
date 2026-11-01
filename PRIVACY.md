@@ -24,22 +24,22 @@ The Extension is unofficial and is **not** affiliated with, endorsed by, or spon
 
 The Extension has one purpose only:
 
-**Help you review follow relationships** (mutual follows, people who do not follow you back, and people you do not follow) using the instagram.com web session already open in your browser, and optionally follow or unfollow accounts from that review.
+**Help you review follow relationships** (mutual follows, people who do not follow you back, and people you do not follow) using the Instagram, GitHub, or Bluesky session already open in your browser. Unfollow can open the profile for you to do it yourself, or — on Instagram only, if you turn Direct on — send the unfollow from the extension.
 
 ---
 
 ## 3. What data is processed
 
-When you run an analysis while logged into instagram.com in Chrome, the Extension may process **in your browser**:
+When you run an analysis while logged into Instagram, GitHub, or Bluesky in Chrome, the Extension may process **in your browser**:
 
 | Data | Examples | Where it is handled |
 |------|----------|---------------------|
 | Account identifiers | Your user id / username (from the open session) | Locally in the browser |
 | Relationship lists | Usernames, display names, profile picture URLs, private/public flags of accounts in your followers/following lists | Locally in the browser |
 | Analysis results | Mutual / not following back / not followed lists | Locally in Chrome storage (optional cache) |
-| Preferences | UI language (English/German) | Locally in Chrome storage |
+| Preferences | UI language (English/German), unfollow mode (safe/direct) | Locally in Chrome storage |
 
-The Extension does **not** ask you to enter your website password into the Extension UI. It uses the session you already have on `instagram.com`.
+The Extension does **not** ask you to enter your website password into the Extension UI. It uses the session you already have on the site you opened.
 
 ### What we do **not** collect
 
@@ -102,10 +102,10 @@ The Extension does **not** load or execute remote JavaScript/Wasm. All extension
 
 | Permission | Reason |
 |------------|--------|
-| `activeTab` / tab messaging | Communicate with the open instagram.com tab to start analysis and actions |
-| `scripting` | Inject/ensure the content script on instagram.com when needed |
-| `storage` | Save language preference and last local result |
-| Host access to `instagram.com` (and related image CDNs) | Read relationship lists via the logged-in web session and show profile pictures |
+| `activeTab` / tab messaging | Communicate with the open Instagram, GitHub, or Bluesky tab to start analysis and actions |
+| `scripting` | Inject/ensure the content script on that site when needed |
+| `storage` | Save language, unfollow mode, and the last local result |
+| Host access to `instagram.com`, `github.com`, `api.github.com`, `bsky.app`, `public.api.bsky.app` (and Instagram image CDNs) | Read relationship lists via the logged-in session and show profile pictures |
 
 ---
 
