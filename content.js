@@ -1038,6 +1038,7 @@ async function fetchList(userId, type, onProgress, expectedCount = null) {
   let variant = "plain";
   const expected = Number(expectedCount);
   const expectSome = Number.isFinite(expected) && expected > 0;
+  const guard = fcPageGuard(`Instagram ${type}`);
 
   do {
     page += 1;
@@ -1065,11 +1066,13 @@ async function fetchList(userId, type, onProgress, expectedCount = null) {
       );
     }
 
+    const before = results.length;
     for (const user of payload.users.map(mapUser)) {
       if (!user.id || seen.has(user.id)) continue;
       seen.add(user.id);
       results.push(user);
     }
+    guard.check(payload.next, results.length - before, results.length);
 
     if (onProgress) {
       onProgress({
@@ -1156,7 +1159,13 @@ async function enrichUsersWithCounts(users, onProgress, { max = 120, delayMs = 5
   });
   const slice = targets.slice(0, max);
   let ok = 0;
-  for (let i = 0; i < slice.length; i++) {
+  // Enrichment is optional. A 429 ends it right away (respect the rate limit);
+  // the lists themselves stay valid, just with fewer counts.
+  let rateLimited = false;
+  const noteError = (err) => {
+    if (/\(429\)|HTTP 429/.test(String(err?.message || err))) rateLimited = true;
+  };
+  for (let i = 0; i < slice.length && !rateLimited; i++) {
     const u = slice[i];
     let got = false;
     // 1) web_profile_info (public profiles)
@@ -1165,20 +1174,21 @@ async function enrichUsersWithCounts(users, onProgress, { max = 120, delayMs = 5
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(u.username)}`
       );
       got = applyProfileInfoToUser(u, data?.data?.user);
-    } catch {
-      /* try next */
+    } catch (err) {
+      noteError(err);
     }
     // 2) users/{id}/info fallback
-    if (!got && u.id) {
+    if (!got && u.id && !rateLimited) {
       try {
         const data = await igFetch(
           `https://www.instagram.com/api/v1/users/${encodeURIComponent(u.id)}/info/`
         );
         got = applyProfileInfoToUser(u, data?.user);
-      } catch {
-        /* skip */
+      } catch (err) {
+        noteError(err);
       }
     }
+    if (rateLimited) break;
     if (got) ok += 1;
     if (onProgress) {
       onProgress({ enriched: i + 1, total: slice.length, ok });

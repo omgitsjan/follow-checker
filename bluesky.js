@@ -79,16 +79,27 @@
     };
   }
 
+  const MAX_PAGES = 200;
+
   async function fetchList(actor, method, listKey, onProgress, expected) {
     const users = [];
+    const seen = new Set();
+    const guard = fcPageGuard(`Bluesky ${listKey}`);
     let cursor = "";
-    for (let page = 0; page < 200; page += 1) {
+    for (let page = 0; ; page += 1) {
       const data = await bskyGet(method, { actor, limit: "100", cursor });
       const batch = Array.isArray(data[listKey]) ? data[listKey] : [];
-      users.push(...batch.map(mapUser).filter((u) => u.id));
+      const before = users.length;
+      for (const user of batch.map(mapUser)) {
+        if (!user.id || seen.has(user.id)) continue;
+        seen.add(user.id);
+        users.push(user);
+      }
       if (onProgress) onProgress(users.length);
       cursor = data.cursor || "";
       if (!cursor || batch.length === 0) break;
+      if (page + 1 >= MAX_PAGES) throw fcIncompleteError(`Bluesky ${listKey}`, users.length);
+      guard.check(cursor, users.length - before, users.length);
       await fcSleep(350);
     }
     if (expected > 0 && users.length === 0) {

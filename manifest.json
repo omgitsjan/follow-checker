@@ -39,7 +39,7 @@
     },
     {
       "matches": ["https://www.instagram.com/*"],
-      "js": ["content.js"],
+      "js": ["fc-shared.js", "content.js"],
       "run_at": "document_idle"
     },
     {

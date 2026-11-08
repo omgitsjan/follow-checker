@@ -51,16 +51,27 @@
     };
   }
 
+  const MAX_PAGES = 100;
+
   async function fetchList(login, kind, onProgress, expected) {
     const users = [];
-    for (let page = 1; page <= 100; page += 1) {
+    const seen = new Set();
+    const guard = fcPageGuard(`GitHub ${kind}`);
+    for (let page = 1; ; page += 1) {
       const batch = await ghJson(
         `https://api.github.com/users/${encodeURIComponent(login)}/${kind}?per_page=100&page=${page}`
       );
       if (!Array.isArray(batch) || batch.length === 0) break;
-      users.push(...batch.map(mapUser));
+      const before = users.length;
+      for (const user of batch.map(mapUser)) {
+        if (seen.has(user.id)) continue;
+        seen.add(user.id);
+        users.push(user);
+      }
       if (onProgress) onProgress(users.length);
       if (batch.length < 100) break;
+      if (page >= MAX_PAGES) throw fcIncompleteError(`GitHub ${kind}`, users.length);
+      guard.check(page + 1, users.length - before, users.length);
       await fcSleep(400);
     }
     if (expected > 0 && users.length === 0) {

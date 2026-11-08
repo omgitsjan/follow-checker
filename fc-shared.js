@@ -9,6 +9,37 @@ if (!globalThis.__fcSharedBoot) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   };
 
+  /**
+   * Pagination end guard. A list is only "complete" when the site says there is
+   * no next page. A cursor that repeats, or pages that add no new accounts,
+   * end the run with an explicit error instead of looping or returning a
+   * partial list as if it were complete.
+   */
+  globalThis.FC_MAX_IDLE_PAGES = 3;
+  globalThis.fcPageGuard = function fcPageGuard(label) {
+    const cursors = new Set();
+    let idle = 0;
+    return {
+      check(nextCursor, newUnique, loaded) {
+        idle = newUnique > 0 ? 0 : idle + 1;
+        if (!nextCursor) return;
+        const key = String(nextCursor);
+        if (cursors.has(key) || idle >= FC_MAX_IDLE_PAGES) {
+          throw new Error(
+            `${label}: the list stopped advancing after ${loaded} accounts (pagination stalled). The result was not saved; try again later.`
+          );
+        }
+        cursors.add(key);
+      },
+    };
+  };
+
+  globalThis.fcIncompleteError = function fcIncompleteError(label, loaded) {
+    return new Error(
+      `${label}: stopped at the safety limit after ${loaded} accounts, so the list would be incomplete. The result was not saved.`
+    );
+  };
+
   globalThis.fcCompareLists = function fcCompareLists(following, followers) {
     const followerIds = new Set(followers.map((u) => u.id));
     const followingIds = new Set(following.map((u) => u.id));

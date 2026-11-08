@@ -9,7 +9,7 @@ var PLATFORMS = [
     label: "Instagram",
     script: "content.js",
     bridge: "ig-bridge.js",
-    shared: false,
+    shared: true,
     supportsDirectUnfollow: true,
     queries: ["https://www.instagram.com/*"],
     match(url) {
