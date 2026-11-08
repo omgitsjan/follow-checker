@@ -8,9 +8,30 @@ const PAGE_SIZE = 50;
 const DELAY_MS = 900; // Pause zwischen Seiten, um Rate-Limits zu vermeiden
 
 let igWwwClaim = "";
-let igBridgeState = "unknown";
 let igCsrfToken = "";
-let igCookieLookupDone = false;
+
+/**
+ * Page bridge (ig-bridge.js, MAIN world) presence:
+ *   unknown --PONG--> ok
+ *   unknown --no PONG in BRIDGE_PING_TIMEOUT_MS--> missing (direct fetch)
+ *   missing --after BRIDGE_MISSING_TTL_MS, next request--> re-probed
+ *   ok --bridged request timed out--> unknown (re-probed next time)
+ * Presence is probed with a cheap FC_PING, never inferred from how long a real
+ * Instagram request takes. One probe at a time (shared promise).
+ */
+const BRIDGE_PING_TIMEOUT_MS = 1500;
+const BRIDGE_MISSING_TTL_MS = 30000;
+const BRIDGE_FETCH_TIMEOUT_MS = 20000;
+const igBridge = { state: "unknown", checkedAt: 0, probe: null };
+
+/**
+ * HttpOnly cookie lookup via the service worker: single flight; only a lookup
+ * that produced a csrftoken stops further lookups. Failures / empty answers are
+ * retried after a backoff instead of being sticky for the whole page.
+ */
+const COOKIE_RETRY_AFTER_FAIL_MS = 10000;
+const COOKIE_RETRY_AFTER_EMPTY_MS = 60000;
+const igCookieLookup = { inflight: null, retryAt: 0 };
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -71,46 +92,68 @@ function igHeaders() {
   return headers;
 }
 
-function pageFetch(url, options) {
-  if (igBridgeState === "missing") {
-    return Promise.reject(new Error("bridge-missing"));
-  }
-  return new Promise((resolve, reject) => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function newBridgeId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** Ask the page bridge once and wait for a reply with a matching id (or null on timeout). */
+function bridgeRequest(message, timeoutMs) {
+  return new Promise((resolve) => {
+    const id = newBridgeId();
     const timer = setTimeout(() => {
       window.removeEventListener("message", onMessage);
-      if (igBridgeState !== "ok") igBridgeState = "missing";
-      reject(new Error("bridge-missing"));
-    }, igBridgeState === "ok" ? 20000 : 1500);
-
+      resolve(null);
+    }, timeoutMs);
     function onMessage(event) {
       if (event.source !== window) return;
       const data = event.data;
       if (!data || data.source !== "fc-bridge" || data.id !== id) return;
       clearTimeout(timer);
       window.removeEventListener("message", onMessage);
-      if (data.error) {
-        reject(new Error(data.error));
-        return;
-      }
-      igBridgeState = "ok";
       resolve(data);
     }
-
     window.addEventListener("message", onMessage);
-    window.postMessage(
-      {
-        source: "fc-content",
-        type: "FC_FETCH",
-        id,
-        url,
-        method: options.method || "GET",
-        headers: options.headers || {},
-        body: options.body || null,
-      },
-      location.origin
-    );
+    window.postMessage({ source: "fc-content", ...message, id }, location.origin);
   });
+}
+
+/** true if the page bridge is usable right now (probes at most once per TTL). */
+function ensureBridge() {
+  if (igBridge.state === "ok") return Promise.resolve(true);
+  if (igBridge.state === "missing" && Date.now() - igBridge.checkedAt < BRIDGE_MISSING_TTL_MS) {
+    return Promise.resolve(false);
+  }
+  if (!igBridge.probe) {
+    igBridge.probe = bridgeRequest({ type: "FC_PING" }, BRIDGE_PING_TIMEOUT_MS).then((reply) => {
+      igBridge.probe = null;
+      igBridge.checkedAt = Date.now();
+      igBridge.state = reply ? "ok" : "missing";
+      return Boolean(reply);
+    });
+  }
+  return igBridge.probe;
+}
+
+async function pageFetch(url, options) {
+  if (!(await ensureBridge())) throw new Error("bridge-missing");
+  const reply = await bridgeRequest(
+    {
+      type: "FC_FETCH",
+      url,
+      method: options.method || "GET",
+      headers: options.headers || {},
+      body: options.body || null,
+    },
+    BRIDGE_FETCH_TIMEOUT_MS
+  );
+  if (!reply) {
+    // The page may still be executing the request: re-probe next time and
+    // tell the caller it timed out (it must not blindly replay non-GETs).
+    igBridge.state = "unknown";
+    throw new Error("bridge-timeout");
+  }
+  if (reply.error) throw new Error(reply.error);
+  return reply;
 }
 
 function parseIgBody(status, text) {
@@ -147,7 +190,9 @@ function parseIgBody(status, text) {
 
 async function igFetch(url, options = {}) {
   const method = options.method || "GET";
-  if (!getCookie("csrftoken") && !igCsrfToken && !igCookieLookupDone) await getIgCookies();
+  if (!getCookie("csrftoken") && !igCsrfToken && (igCookieLookup.inflight || Date.now() >= igCookieLookup.retryAt)) {
+    await getIgCookies();
+  }
   const headers = {
     ...igHeaders(),
     ...(options.headers || {}),
@@ -162,7 +207,11 @@ async function igFetch(url, options = {}) {
     text = bridged.text || "";
     responseHeaders = bridged.headers || {};
   } catch (err) {
-    if (err?.message !== "bridge-missing") throw err;
+    const reason = err?.message;
+    if (reason === "bridge-timeout" && method !== "GET") {
+      throw new Error("Instagram request timed out. Check the tab before trying again.");
+    }
+    if (reason !== "bridge-missing" && reason !== "bridge-timeout") throw err;
     const res = await fetch(url, {
       method,
       credentials: "include",
@@ -289,6 +338,27 @@ function decodeJsonString(raw) {
   }
 }
 
+/** Ask the service worker for HttpOnly cookies (one request in flight at a time). */
+function lookupIgCookiesInBackground() {
+  if (!igCookieLookup.inflight) {
+    igCookieLookup.inflight = (async () => {
+      let res = null;
+      try {
+        res = await chrome.runtime.sendMessage({ type: "FC_IG_COOKIES" });
+      } catch {
+        /* background not reachable (e.g. extension reloaded) */
+      }
+      const ok = Boolean(res?.ok);
+      if (ok && res.csrftoken) igCsrfToken = res.csrftoken;
+      igCookieLookup.retryAt =
+        Date.now() + (ok ? COOKIE_RETRY_AFTER_EMPTY_MS : COOKIE_RETRY_AFTER_FAIL_MS);
+      igCookieLookup.inflight = null;
+      return ok ? res : null;
+    })();
+  }
+  return igCookieLookup.inflight;
+}
+
 /** ds_user_id / csrftoken – document.cookie first, then the extension cookie API (HttpOnly-safe). */
 async function getIgCookies() {
   const out = {
@@ -296,15 +366,10 @@ async function getIgCookies() {
     csrftoken: getCookie("csrftoken") || igCsrfToken || "",
   };
   if (!isIgUserId(out.dsUserId) || !out.csrftoken) {
-    igCookieLookupDone = true;
-    try {
-      const res = await chrome.runtime.sendMessage({ type: "FC_IG_COOKIES" });
-      if (res?.ok) {
-        if (!isIgUserId(out.dsUserId) && isIgUserId(res.dsUserId)) out.dsUserId = res.dsUserId;
-        if (!out.csrftoken && res.csrftoken) out.csrftoken = res.csrftoken;
-      }
-    } catch {
-      /* background not reachable (e.g. extension reloaded) */
+    const res = await lookupIgCookiesInBackground();
+    if (res) {
+      if (!isIgUserId(out.dsUserId) && isIgUserId(res.dsUserId)) out.dsUserId = res.dsUserId;
+      if (!out.csrftoken && res.csrftoken) out.csrftoken = res.csrftoken;
     }
   }
   if (!isIgUserId(out.dsUserId)) out.dsUserId = "";
@@ -313,25 +378,10 @@ async function getIgCookies() {
 }
 
 /** Viewer data from the page's own JS modules (MAIN world via ig-bridge.js). */
-function bridgeViewer() {
-  if (igBridgeState === "missing") return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const timer = setTimeout(() => {
-      window.removeEventListener("message", onMessage);
-      resolve(null);
-    }, 1500);
-    function onMessage(event) {
-      if (event.source !== window) return;
-      const data = event.data;
-      if (!data || data.source !== "fc-bridge" || data.id !== id) return;
-      clearTimeout(timer);
-      window.removeEventListener("message", onMessage);
-      resolve(data.viewer || null);
-    }
-    window.addEventListener("message", onMessage);
-    window.postMessage({ source: "fc-content", type: "FC_VIEWER", id }, location.origin);
-  });
+async function bridgeViewer() {
+  if (!(await ensureBridge())) return null;
+  const reply = await bridgeRequest({ type: "FC_VIEWER" }, BRIDGE_PING_TIMEOUT_MS);
+  return reply?.viewer || null;
 }
 
 /** Viewer data from inline JSON Instagram ships with the page. */
