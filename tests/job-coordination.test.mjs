@@ -3,6 +3,7 @@
 // run in separate contexts against one shared storage + one service worker.
 import test from "node:test";
 import assert from "node:assert/strict";
+import vm from "node:vm";
 import {
   loadExtension,
   createWindow,
@@ -246,4 +247,10 @@ test("job messages from a tab of another site are rejected (platform bound to se
   );
   assert.equal(res?.ok, false);
   assert.equal(w.storage.data["fcJob:instagram"], undefined);
+});
+
+test("worker lease expiry and popup/content staleness use the same window", () => {
+  const w = world();
+  const a = w.tab(1);
+  assert.equal(vm.runInContext("JOB_STALE_MS", w.bus.background.ctx), a.run("fcJobs.STALE_MS"));
 });
