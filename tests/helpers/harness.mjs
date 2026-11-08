@@ -295,6 +295,7 @@ export function loadExtension(files, opts = {}) {
     Date: FakeDate,
     URL,
     URLSearchParams,
+    AbortController,
     structuredClone,
     localStorage: { length: 0, key: () => null, getItem: () => null },
     ...(opts.globals || {}),

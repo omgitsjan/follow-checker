@@ -10,6 +10,36 @@ if (!globalThis.__fcSharedBoot) {
   };
 
   /**
+   * fetch + full body read with an upper time bound, so a request (or a body)
+   * that never finishes cannot hold a job forever (90 s per request). The request is aborted on
+   * timeout; nothing is retried here (callers decide, 429 is never retried).
+   */
+  // Below the 120 s lease window: a hung request ends its job (and frees the
+  // lease) before the lease could expire and be taken over.
+  globalThis.FC_REQUEST_TIMEOUT_MS = 90000;
+  globalThis.fcFetchText = async function fcFetchText(url, init = {}, { timeoutMs = FC_REQUEST_TIMEOUT_MS, label = "Request" } = {}) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller?.abort();
+        reject(new Error(`${label} timed out. Try again later.`));
+      }, timeoutMs);
+    });
+    const work = (async () => {
+      const res = await fetch(url, controller ? { ...init, signal: controller.signal } : init);
+      const text = await res.text();
+      return { status: res.status, ok: res.ok, headers: res.headers, text };
+    })();
+    try {
+      return await Promise.race([work, timeout]);
+    } finally {
+      clearTimeout(timer);
+      globalThis.fcJobs?.touch();
+    }
+  };
+
+  /**
    * Pagination end guard. A list is only "complete" when the site says there is
    * no next page. A cursor that repeats, or pages that add no new accounts,
    * end the run with an explicit error instead of looping or returning a
@@ -62,6 +92,7 @@ if (!globalThis.__fcSharedBoot) {
     const STALE_MS = 120000;
     const HEARTBEAT_MS = 15000;
     const LEASE_LOST = "This analysis was taken over by a newer run.";
+    const STALLED = "The analysis stopped because it made no progress for 2 minutes. Try again.";
     const owner = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     let active = null;
 
@@ -95,8 +126,22 @@ if (!globalThis.__fcSharedBoot) {
 
     function publicJob(job) {
       if (!job) return null;
-      const { heartbeatTimer, fenced, ...rest } = job;
+      const { heartbeatTimer, fenced, stalled, progressAt, ...rest } = job;
       return rest;
+    }
+
+    /**
+     * Heartbeat timer: only renews the lease while the work makes real progress
+     * (a stage update or a finished request). Without progress for STALE_MS it
+     * stops renewing, so the lease expires and can be taken over.
+     */
+    function tick(job) {
+      if (Date.now() - job.progressAt >= STALE_MS) {
+        job.stalled = true;
+        clearInterval(job.heartbeatTimer);
+        return;
+      }
+      beat(job);
     }
 
     async function beat(job) {
@@ -120,6 +165,7 @@ if (!globalThis.__fcSharedBoot) {
         stage: "start",
         startedAt: now,
         heartbeatAt: now,
+        progressAt: now,
       };
       active = job; // also blocks concurrent messages inside this tab right away
       const res = await lease({ op: "claim", platform, kind, jobId: job.id });
@@ -131,7 +177,7 @@ if (!globalThis.__fcSharedBoot) {
           error: "Could not reserve the analysis (extension background not reachable). Reload the tab and try again.",
         };
       }
-      job.heartbeatTimer = setInterval(() => beat(job), HEARTBEAT_MS);
+      job.heartbeatTimer = setInterval(() => tick(job), HEARTBEAT_MS);
       return { ok: true, job };
     }
 
@@ -139,11 +185,18 @@ if (!globalThis.__fcSharedBoot) {
     function progress(job, stage) {
       if (!job) return;
       if (job.fenced) throw new Error(LEASE_LOST);
+      if (job.stalled) throw new Error(STALLED);
       job.heartbeatAt = Date.now();
+      job.progressAt = job.heartbeatAt;
       if (stage && stage !== job.stage) {
         job.stage = stage;
         beat(job);
       }
+    }
+
+    /** A bounded request of the running job finished (success or error): that is progress. */
+    function touch() {
+      if (active && !active.stalled) active.progressAt = Date.now();
     }
 
     /** End the job; returns the worker's answer ({ok}, {fenced} or null if unreachable). */
@@ -183,7 +236,9 @@ if (!globalThis.__fcSharedBoot) {
         } catch (err) {
           const error = err?.message || String(err);
           answer = await finish(job, { ok: false, error });
-          message = { type: "RESULT", ok: false, platform, jobId: job.id, error: answer?.error || error };
+          // Sanitized text if the worker stored it; otherwise the original reason
+          // (never the worker's own "store unavailable" message).
+          message = { type: "RESULT", ok: false, platform, jobId: job.id, error: answer?.ok && answer.error ? answer.error : error };
         }
         // A fenced (expired and taken over) job stays silent; its data is stale.
         if (answer?.fenced || job.fenced) return;
@@ -192,7 +247,7 @@ if (!globalThis.__fcSharedBoot) {
       return { ok: true, started: true, jobId: job.id };
     }
 
-    return { STALE_MS, HEARTBEAT_MS, owner, keys, isActive, isInterrupted, read, start, progress, finish, runAnalysis, current: () => publicJob(active) };
+    return { STALE_MS, HEARTBEAT_MS, owner, keys, isActive, isInterrupted, read, start, progress, touch, finish, runAnalysis, current: () => publicJob(active) };
   })();
 
   globalThis.fcCompareLists = function fcCompareLists(following, followers) {

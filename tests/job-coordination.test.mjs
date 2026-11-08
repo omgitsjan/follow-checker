@@ -52,9 +52,10 @@ function world({ storageInitial = {} } = {}) {
   const clock = new FakeClock();
   const storage = createStorage({ initial: storageInitial });
   const bus = createBus({ storage, clock });
-  const tab = (tabId, { files = ["fc-shared.js", "content.js"], url, overrides, document } = {}) =>
+  // `tabClock`: a separate clock for one tab, i.e. a frozen tab whose timers do not run.
+  const tab = (tabId, { files = ["fc-shared.js", "content.js"], url, overrides, document, tabClock } = {}) =>
     loadExtension(files, {
-      clock,
+      clock: tabClock || clock,
       storage,
       bus,
       tabId,
@@ -157,11 +158,16 @@ test("stale-owner fence: late heartbeat/result/failure of an expired job never o
   const w = world();
   let releaseA;
   const holdA = new Promise((r) => (releaseA = r));
+  // Tab A is frozen (e.g. a discarded/throttled background tab): its own timers
+  // (heartbeat, request timeout) do not run while the rest of the world moves on.
+  const clockA = new FakeClock(w.clock.now);
   const a = w.tab(1, {
+    tabClock: clockA,
     overrides: (url) => (url.includes("/followers/") ? holdA.then(() => jsonResponse({ users: [igUser(9)], next_max_id: null })) : undefined),
   });
   const ra = await a.chrome.dispatch({ type: "ANALYZE" });
-  w.bus.dropped.add(1); // tab A frozen (e.g. throttled background tab)
+  await clockA.advance(1000);
+  w.bus.dropped.add(1);
   await w.clock.advance(3 * 60_000);
 
   const b = w.tab(2);
@@ -173,9 +179,9 @@ test("stale-owner fence: late heartbeat/result/failure of an expired job never o
 
   // A wakes up: its heartbeat and its result arrive late.
   w.bus.dropped.delete(1);
-  await w.clock.advance(20_000);
+  await clockA.advance(20_000); // A thaws: its next heartbeat learns it was fenced
   releaseA();
-  await advanceUntil(w.clock, () => a.run("fcJobs.current()") === null, { step: 500, max: 4000 });
+  await advanceUntil(clockA, () => a.run("fcJobs.current()") === null, { step: 500, max: 4000 });
   await flush();
   assert.deepEqual(w.storage.data["fcResult:instagram"], resultB, "B's result untouched");
   assert.equal(w.storage.data["fcJob:instagram"].id, rb.jobId);

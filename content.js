@@ -31,6 +31,7 @@ const igBridge = { state: "unknown", checkedAt: 0, probe: null };
  */
 const COOKIE_RETRY_AFTER_FAIL_MS = 10000;
 const COOKIE_RETRY_AFTER_EMPTY_MS = 60000;
+const COOKIE_LOOKUP_TIMEOUT_MS = 5000;
 const igCookieLookup = { inflight: null, retryAt: 0 };
 
 function sleep(ms) {
@@ -206,22 +207,21 @@ async function igFetch(url, options = {}) {
     status = bridged.status;
     text = bridged.text || "";
     responseHeaders = bridged.headers || {};
+    fcJobs.touch(); // a finished request is progress for the job watchdog
   } catch (err) {
     const reason = err?.message;
     if (reason === "bridge-timeout" && method !== "GET") {
       throw new Error("Instagram request timed out. Check the tab before trying again.");
     }
     if (reason !== "bridge-missing" && reason !== "bridge-timeout") throw err;
-    const res = await fetch(url, {
-      method,
-      credentials: "include",
-      headers,
-      body: options.body,
-      referrer: location.href,
-    });
+    const res = await fcFetchText(
+      url,
+      { method, credentials: "include", headers, body: options.body, referrer: location.href },
+      { label: "Instagram request" }
+    );
     status = res.status;
-    text = await res.text();
-    const claim = res.headers.get("x-ig-set-www-claim");
+    text = res.text;
+    const claim = res.headers?.get?.("x-ig-set-www-claim");
     if (claim) responseHeaders["x-ig-set-www-claim"] = claim;
   }
 
@@ -343,10 +343,19 @@ function lookupIgCookiesInBackground() {
   if (!igCookieLookup.inflight) {
     igCookieLookup.inflight = (async () => {
       let res = null;
+      let timer;
       try {
-        res = await chrome.runtime.sendMessage({ type: "FC_IG_COOKIES" });
+        // Bounded: an unanswered message must not stall the caller.
+        res = await Promise.race([
+          chrome.runtime.sendMessage({ type: "FC_IG_COOKIES" }),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(null), COOKIE_LOOKUP_TIMEOUT_MS);
+          }),
+        ]);
       } catch {
         /* background not reachable (e.g. extension reloaded) */
+      } finally {
+        clearTimeout(timer);
       }
       const ok = Boolean(res?.ok);
       if (ok && res.csrftoken) igCsrfToken = res.csrftoken;

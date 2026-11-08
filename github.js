@@ -17,22 +17,38 @@
     };
   }
 
-  async function ghJson(url) {
-    const res = await fetch(url, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+  /** One bounded API call. Returns the parsed body and whether a Link rel="next" exists (null = no Link header). */
+  async function ghGet(url) {
+    const res = await fcFetchText(
+      url,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        credentials: "omit",
       },
-      credentials: "omit",
-    });
+      { label: "GitHub request" }
+    );
     if (res.status === 403 || res.status === 429) {
-      const left = res.headers.get("x-ratelimit-remaining");
+      const left = res.headers?.get?.("x-ratelimit-remaining");
       if (left === "0") {
         throw new Error("GitHub rate limit reached. Wait a while and try again.");
       }
     }
     if (!res.ok) throw new Error(`GitHub responded with HTTP ${res.status}`);
-    return res.json();
+    let data;
+    try {
+      data = JSON.parse(res.text);
+    } catch {
+      throw new Error("GitHub returned a non-JSON response.");
+    }
+    const link = res.headers?.get?.("link");
+    return { data, hasNext: link == null ? null : /rel="next"/.test(link) };
+  }
+
+  async function ghJson(url) {
+    return (await ghGet(url)).data;
   }
 
   async function getMe() {
@@ -57,21 +73,34 @@
     const users = [];
     const seen = new Set();
     const guard = fcPageGuard(`GitHub ${kind}`);
-    for (let page = 1; ; page += 1) {
-      const batch = await ghJson(
-        `https://api.github.com/users/${encodeURIComponent(login)}/${kind}?per_page=100&page=${page}`
-      );
-      if (!Array.isArray(batch) || batch.length === 0) break;
+    const listUrl = (page) =>
+      `https://api.github.com/users/${encodeURIComponent(login)}/${kind}?per_page=100&page=${page}`;
+    const add = (batch) => {
       const before = users.length;
       for (const user of batch.map(mapUser)) {
         if (seen.has(user.id)) continue;
         seen.add(user.id);
         users.push(user);
       }
+      return users.length - before;
+    };
+    for (let page = 1; ; page += 1) {
+      const { data: batch, hasNext } = await ghGet(listUrl(page));
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      const added = add(batch);
       if (onProgress) onProgress(users.length);
-      if (batch.length < 100) break;
-      if (page >= MAX_PAGES) throw fcIncompleteError(`GitHub ${kind}`, users.length);
-      guard.check(page + 1, users.length - before, users.length);
+      // The Link header is authoritative when present; otherwise a short page ends the list.
+      const more = hasNext === null ? batch.length === 100 : hasNext;
+      if (!more) break;
+      if (page >= MAX_PAGES) {
+        if (hasNext) throw fcIncompleteError(`GitHub ${kind}`, users.length);
+        // No Link header: one probe page decides whether the cap was exactly the end.
+        await fcSleep(400);
+        const probe = (await ghGet(listUrl(page + 1))).data;
+        if (Array.isArray(probe) && probe.length > 0) throw fcIncompleteError(`GitHub ${kind}`, users.length);
+        break;
+      }
+      guard.check(page + 1, added, users.length);
       await fcSleep(400);
     }
     if (expected > 0 && users.length === 0) {
