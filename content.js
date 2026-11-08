@@ -1198,34 +1198,43 @@ async function enrichUsersWithCounts(users, onProgress, { max = 120, delayMs = 5
   return users;
 }
 
-function compareLists(following, followers) {
-  const followerIds = new Set(followers.map((u) => u.id));
-  const followingIds = new Set(following.map((u) => u.id));
+/** Full relationship analysis. `report` sends PROGRESS and keeps the job heartbeat fresh. */
+async function runInstagramAnalysis(report) {
+  const me = await getCurrentUser();
+  report({ stage: "user", me });
 
-  const mutual = [];
-  const notFollowingBack = [];
-  const notFollowedByMe = [];
+  report({ stage: "following", loaded: 0, total: me.followingCount });
+  const following = await fetchList(
+    me.id,
+    "following",
+    (p) => report({ stage: "following", loaded: p.loaded, total: me.followingCount }),
+    me.followingCount
+  );
 
-  for (const u of following) {
-    if (followerIds.has(u.id)) mutual.push(u);
-    else notFollowingBack.push(u);
-  }
+  report({ stage: "followers", loaded: 0, total: me.followersCount });
+  const followers = await fetchList(
+    me.id,
+    "followers",
+    (p) => report({ stage: "followers", loaded: p.loaded, total: me.followersCount }),
+    me.followersCount
+  );
 
-  for (const u of followers) {
-    if (!followingIds.has(u.id)) notFollowedByMe.push(u);
-  }
+  // Light enrich for bots heuristics only (charts use list buckets, no counts needed)
+  await enrichUsersWithCounts(
+    followers,
+    (p) =>
+      report({
+        stage: "enrich",
+        target: "followers",
+        enriched: p.enriched,
+        total: p.total,
+        ok: p.ok,
+      }),
+    { max: 40, delayMs: 450 }
+  );
 
-  const byName = (a, b) =>
-    a.username.localeCompare(b.username, undefined, { sensitivity: "base" });
-
-  mutual.sort(byName);
-  notFollowingBack.sort(byName);
-  notFollowedByMe.sort(byName);
-
-  return { mutual, notFollowingBack, notFollowedByMe };
+  return fcBuildResult("instagram", me, following, followers);
 }
-
-let running = false;
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "PING") {
@@ -1271,6 +1280,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     msg?.type === "ANALYZE_OWN_POSTS"
   ) {
     (async () => {
+      // Shares the single job slot with ANALYZE so both never hit Instagram in parallel.
+      const claim = await fcJobs.start("instagram", "posts", { persist: false });
+      if (!claim.ok) {
+        sendResponse({ ok: false, busy: true, job: claim.job, error: "Analysis already running." });
+        return;
+      }
+      const job = claim.job;
+      let outcome = { ok: false, error: "aborted" };
       try {
         const onProgress = (p) => {
           chrome.runtime
@@ -1288,6 +1305,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           maxPostsForLikers: msg.maxPostsForLikers ?? 12,
         });
 
+        outcome = { ok: true };
         sendResponse({
           ok: true,
           posts: result.posts,
@@ -1298,7 +1316,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           finishedAt: Date.now(),
         });
       } catch (err) {
-        sendResponse({ ok: false, error: err?.message || String(err) });
+        outcome = { ok: false, error: err?.message || String(err) };
+        sendResponse({ ok: false, error: outcome.error });
+      } finally {
+        await fcJobs.finish(job, outcome);
       }
     })();
     return true;
@@ -1317,122 +1338,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg?.type === "ANALYZE") {
-    if (running) {
-      sendResponse({ ok: false, error: "Analysis already running." });
-      return false;
-    }
-
-    running = true;
-    (async () => {
-      try {
-        const me = await getCurrentUser();
-
-        chrome.runtime
-          .sendMessage({
-            type: "PROGRESS",
-            stage: "user",
-            me,
-          })
-          .catch(() => {});
-
-        const following = await fetchList(
-          me.id,
-          "following",
-          (p) => {
-            chrome.runtime
-              .sendMessage({
-                type: "PROGRESS",
-                stage: "following",
-                loaded: p.loaded,
-                total: me.followingCount,
-              })
-              .catch(() => {});
-          },
-          me.followingCount
-        );
-
-        const followers = await fetchList(
-          me.id,
-          "followers",
-          (p) => {
-            chrome.runtime
-              .sendMessage({
-                type: "PROGRESS",
-                stage: "followers",
-                loaded: p.loaded,
-                total: me.followersCount,
-              })
-              .catch(() => {});
-          },
-          me.followersCount
-        );
-
-        // Light enrich for bots heuristics only (charts use list buckets, no counts needed)
-        await enrichUsersWithCounts(
-          followers,
-          (p) => {
-            chrome.runtime
-              .sendMessage({
-                type: "PROGRESS",
-                stage: "enrich",
-                target: "followers",
-                enriched: p.enriched,
-                total: p.total,
-                ok: p.ok,
-              })
-              .catch(() => {});
-          },
-          { max: 40, delayMs: 450 }
-        );
-
-        const lists = compareLists(following, followers);
-        const result = {
-          type: "RESULT",
-          ok: true,
-          platform: "instagram",
-          me,
-          counts: {
-            following: following.length,
-            followers: followers.length,
-            mutual: lists.mutual.length,
-            notFollowingBack: lists.notFollowingBack.length,
-            notFollowedByMe: lists.notFollowedByMe.length,
-          },
-          following,
-          followers,
-          mutual: lists.mutual,
-          notFollowingBack: lists.notFollowingBack,
-          notFollowedByMe: lists.notFollowedByMe,
-          finishedAt: Date.now(),
-        };
-
-        // Persist if popup was closed
-        try {
-          await chrome.storage.local.set({ lastResult: result });
-        } catch {
-          /* ignore */
-        }
-
-        chrome.runtime.sendMessage(result).catch(() => {});
-      } catch (err) {
-        const fail = {
-          type: "RESULT",
-          ok: false,
-          error: err?.message || String(err),
-        };
-        try {
-          await chrome.storage.local.set({ lastResult: fail });
-        } catch {
-          /* ignore */
-        }
-        chrome.runtime.sendMessage(fail).catch(() => {});
-      } finally {
-        running = false;
-      }
-    })();
-
-    sendResponse({ ok: true, started: true });
-    return false;
+    fcJobs
+      .runAnalysis("instagram", (report) => runInstagramAnalysis(report))
+      .then((res) => sendResponse(res.ok ? res : { ...res, error: "Analysis already running." }));
+    return true; // async sendResponse
   }
 
   return false;

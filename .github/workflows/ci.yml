@@ -38,6 +38,9 @@ jobs:
           node --check i18n.js
           node --check analytics.js
 
+      - name: Unit tests (node:test, no network)
+        run: node --test "tests/*.test.mjs"
+
       - name: Package extension zip (artifact)
         run: |
           VERSION=$(node -p "require('./manifest.json').version")
