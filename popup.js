@@ -47,6 +47,7 @@ const state = {
   jobPlatform: null,
   jobAliveAt: 0,
   finishedAt: null,
+  resultJobId: null,
   platformId: "instagram",
   resultPlatform: null,
   unfollowMode: "safe",
@@ -1032,11 +1033,18 @@ async function persistState() {
     finishedAt: state.finishedAt || Date.now(),
     editedAt: Date.now(),
   };
+  // Written by the service worker, and only if the stored result is still the
+  // one this edit is based on (a newer analysis is never overwritten).
   try {
-    await chrome.storage.local.set({ [fcJobs.keys(platform).result]: result });
-    await chrome.storage.local.remove(["lastResult"]);
+    await chrome.runtime.sendMessage({
+      type: "FC_RESULT_EDIT",
+      platform,
+      baseJobId: state.resultJobId,
+      baseFinishedAt: state.finishedAt,
+      result,
+    });
   } catch {
-    /* ignore */
+    /* worker unreachable: the edit stays on screen only */
   }
 }
 
@@ -1323,6 +1331,8 @@ async function readRestoreSnapshot() {
     const e = stored[k.error];
     if (e?.error && (!error || (e.at || 0) > (error.at || 0))) error = { ...e, platform: id };
     const job = stored[k.job];
+    // Only relationship analyses drive the start button / progress view.
+    if (job && job.kind && job.kind !== "analyze") continue;
     if (fcJobs.isActive(job, now)) running = job;
     else if (fcJobs.isInterrupted(job, now)) interrupted = job;
   }
@@ -1421,6 +1431,7 @@ function onResult(msg, { keepTab = false, restored = false } = {}) {
   state.notFollowedByMe = msg.notFollowedByMe || [];
   state.counts = msg.counts;
   state.finishedAt = msg.finishedAt || null;
+  state.resultJobId = msg.jobId || null;
   if (!restored) reconcilePendingManual(state.resultPlatform, state.following, state.followers);
 
   // Older cached results may lack full lists — rebuild when possible

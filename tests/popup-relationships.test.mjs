@@ -113,3 +113,24 @@ test("a fresh analysis resolves opened-profile reminders it can confirm, keeps t
   assert.deepEqual(p.run("state.pendingManual"), { "instagram:1": "unfollow", "github:2": "unfollow" });
   assert.deepEqual(p.storage.data.pendingManual, { "instagram:1": "unfollow", "github:2": "unfollow" });
 });
+
+test("a local edit never overwrites a newer analysis result stored meanwhile", async () => {
+  const clock = new FakeClock(T0);
+  const p = await loadPopup({ clock, storageInitial: { "fcResult:instagram": { ...base(), jobId: "job-old" } } });
+  // Another tab finished a newer analysis while this popup still shows the old one.
+  const newer = { ...base(), following: [A], notFollowingBack: [], mutual: [A], jobId: "job-new", finishedAt: T0 };
+  p.storage.data["fcResult:instagram"] = structuredClone(newer);
+  await manual(p, B, "unfollow", "notBack");
+  await flush(40);
+  assert.deepEqual(p.storage.data["fcResult:instagram"], newer);
+});
+
+test("a local edit of the current result is persisted with its job id", async () => {
+  const clock = new FakeClock(T0);
+  const p = await loadPopup({ clock, storageInitial: { "fcResult:instagram": { ...base(), jobId: "job-old" } } });
+  await manual(p, B, "unfollow", "notBack");
+  await flush(40);
+  const stored = p.storage.data["fcResult:instagram"];
+  assert.equal(stored.jobId, "job-old");
+  assert.equal(stored.following.some((u) => u.id === B.id), false);
+});

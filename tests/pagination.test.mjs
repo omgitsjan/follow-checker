@@ -97,6 +97,7 @@ function github(fetchImpl) {
   const clock = new FakeClock();
   return loadExtension(["fc-shared.js", "github.js"], {
     clock,
+    url: "https://github.com/octo",
     window: createWindow(),
     document: {
       cookie: "",
@@ -131,6 +132,7 @@ function bluesky(fetchImpl) {
   const clock = new FakeClock();
   return loadExtension(["fc-shared.js", "bluesky.js"], {
     clock,
+    url: "https://bsky.app/",
     window: createWindow(),
     document: {
       cookie: "",

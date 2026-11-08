@@ -154,3 +154,12 @@ test("a busy answer from the content script switches to the running view instead
   assert.equal(p.run("state.analysisRunning"), true);
   assert.equal(p.$("startBtn").disabled, true);
 });
+
+test("a running FETCH_OWN_POSTS lease is not shown as a running relationship analysis", async () => {
+  const clock = new FakeClock(T0);
+  const p = await loadPopup({
+    clock,
+    storageInitial: { "fcJob:instagram": runningJob("instagram", T0, { kind: "posts" }) },
+  });
+  assert.equal(p.run("state.analysisRunning"), false);
+});

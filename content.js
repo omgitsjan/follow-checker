@@ -1281,15 +1281,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   ) {
     (async () => {
       // Shares the single job slot with ANALYZE so both never hit Instagram in parallel.
-      const claim = await fcJobs.start("instagram", "posts", { persist: false });
+      const claim = await fcJobs.start("instagram", "posts");
       if (!claim.ok) {
-        sendResponse({ ok: false, busy: true, job: claim.job, error: "Analysis already running." });
+        sendResponse(claim.busy ? { ...claim, error: "Analysis already running." } : claim);
         return;
       }
       const job = claim.job;
       let outcome = { ok: false, error: "aborted" };
       try {
         const onProgress = (p) => {
+          fcJobs.progress(job, "posts");
           chrome.runtime
             .sendMessage({
               type: "PROGRESS",
@@ -1340,7 +1341,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "ANALYZE") {
     fcJobs
       .runAnalysis("instagram", (report) => runInstagramAnalysis(report))
-      .then((res) => sendResponse(res.ok ? res : { ...res, error: "Analysis already running." }));
+      .then((res) => sendResponse(res.ok || !res.busy ? res : { ...res, error: "Analysis already running." }));
     return true; // async sendResponse
   }
 

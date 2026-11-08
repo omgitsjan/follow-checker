@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
-import { ROOT, FakeClock, createStorage, flush } from "./harness.mjs";
+import { ROOT, FakeClock, createStorage, createBus, flush } from "./harness.mjs";
 
 class FakeClassList {
   constructor(el) {
@@ -125,11 +125,13 @@ export async function loadPopup({ storageInitial = {}, storage, tabs = [{ id: 7,
   const runtimeListeners = [];
   const tabMessages = [];
   const created = [];
+  const bus = createBus({ storage, clock });
+  const popupSender = { id: "test-extension", url: "chrome-extension://test-extension/popup.html" };
   const chrome = {
     runtime: {
       id: "test-extension",
       onMessage: { addListener: (fn) => runtimeListeners.push(fn) },
-      sendMessage: async () => undefined,
+      sendMessage: async (msg) => (String(msg?.type || "").startsWith("FC_") ? bus.send(msg, popupSender) : undefined),
       getURL: (p) => `chrome-extension://test/${p}`,
     },
     storage: { local: storage },
@@ -193,5 +195,5 @@ export async function loadPopup({ storageInitial = {}, storage, tabs = [{ id: 7,
     for (const fn of runtimeListeners) fn(structuredClone(msg), {}, () => {});
     await flush(40);
   };
-  return { ctx, run, document, storage, chrome, clock, tabMessages, created, deliver, $: (id) => document.getElementById(id) };
+  return { ctx, run, document, storage, chrome, clock, bus, tabMessages, created, deliver, $: (id) => document.getElementById(id) };
 }

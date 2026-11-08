@@ -1,6 +1,6 @@
 # Privacy Policy – Follow Checker
 
-**Last updated:** 2026-08-28  
+**Last updated:** 2026-11-08  
 **Developer:** omgitsjan ([GitHub](https://github.com/omgitsjan))  
 **Extension:** Follow Checker  
 **Source code:** https://github.com/omgitsjan/instagram-follow-checker  
@@ -36,7 +36,8 @@ When you run an analysis while logged into Instagram, GitHub, or Bluesky in Chro
 |------|----------|---------------------|
 | Account identifiers | Your user id / username (from the open session) | Locally in the browser |
 | Relationship lists | Usernames, display names, profile picture URLs, private/public flags of accounts in your followers/following lists | Locally in the browser |
-| Analysis results | Mutual / not following back / not followed lists | Locally in Chrome storage (optional cache) |
+| Analysis results | Mutual / not following back / not followed lists; per site (Instagram, GitHub, Bluesky) the last successful result | Locally in Chrome storage (optional cache) |
+| Analysis status | Per site: status of the current or last analysis (running / finished / failed, step, timestamps, random job and instance ids) and the short error message of the last failed analysis | Locally in Chrome storage |
 | Preferences | UI language (English/German), unfollow mode (safe/direct) | Locally in Chrome storage |
 
 The Extension does **not** ask you to enter your website password into the Extension UI. It uses the session you already have on the site you opened.
@@ -62,7 +63,7 @@ Data processed by the Extension is used **only** to:
 1. Load and compare your followers and following lists  
 2. Display results in the Extension popup  
 3. Perform follow/unfollow actions you explicitly trigger  
-4. Remember language preference and optionally the last local analysis result  
+4. Remember language preference, the last local analysis result per site, and the status / last error of an analysis (so a reopened popup can show a running or failed analysis)  
 
 Data is **not** used for advertising, credit scoring, resale, or unrelated analytics.
 
@@ -70,7 +71,9 @@ Data is **not** used for advertising, credit scoring, resale, or unrelated analy
 
 ## 5. Storage and retention
 
-- Preferences and the last analysis result may be stored via `chrome.storage.local` **on your device**.  
+- Preferences, the last successful analysis result per site, and the analysis status / last error message per site may be stored via `chrome.storage.local` **on your device**. They are not sent over the network.  
+- Per site, each new analysis replaces the status entry, the next failed analysis replaces the error entry, and the next successful analysis replaces the result. They stay until then or until extension storage is cleared.  
+- Stored error messages are cut to 200 characters and have web addresses and token-like values removed. They can contain a short status text the site returned (for example "HTTP 429"); cookies and full server responses are not stored.  
 - You can remove this data by removing the Extension or clearing extension storage in Chrome.  
 - We do not maintain a cloud copy of your lists.
 
@@ -104,7 +107,7 @@ The Extension does **not** load or execute remote JavaScript/Wasm. All extension
 |------------|--------|
 | `activeTab` / tab messaging | Communicate with the open Instagram, GitHub, or Bluesky tab to start analysis and actions |
 | `scripting` | Inject/ensure the content script on that site when needed |
-| `storage` | Save language, unfollow mode, and the last local result |
+| `storage` | Save language, unfollow mode, the last local result per site, and the analysis status / last error per site |
 | `cookies` | Read only `ds_user_id` (your numeric Instagram account id) and `csrftoken` on instagram.com when Instagram marks them HttpOnly, so the open Instagram tab knows which account is logged in. Values are not stored or sent anywhere; `sessionid` and other sites are never read |
 | Host access to `instagram.com`, `github.com`, `api.github.com`, `bsky.app`, `public.api.bsky.app` (and Instagram image CDNs) | Read relationship lists via the logged-in session and show profile pictures |
 
@@ -143,5 +146,5 @@ https://github.com/omgitsjan
 
 ## 13. German short notice / Deutsch
 
-Diese Erweiterung verarbeitet Follower-/Following-Informationen **nur lokal in deinem Browser**, speichert optional Sprache und das letzte Ergebnis in `chrome.storage.local` und **sendet keine Analyse-Daten an Server des Entwicklers**. Es gibt **keinen Remotecode**. Inoffiziell, nicht mit Meta verbunden. Nutzung von instagram.com unterliegt den Regeln von Meta. Optional Links zu GitHub und PayPal führen zu Drittanbietern mit eigenen Datenschutzregeln.  
+Diese Erweiterung verarbeitet Follower-/Following-Informationen **nur lokal in deinem Browser**, speichert optional Sprache, pro Seite das letzte erfolgreiche Ergebnis sowie Status und letzte (gekürzte, bereinigte) Fehlermeldung einer Analyse in `chrome.storage.local` und **sendet keine Analyse-Daten an Server des Entwicklers**. Es gibt **keinen Remotecode**. Inoffiziell, nicht mit Meta verbunden. Nutzung von instagram.com unterliegt den Regeln von Meta. Optional Links zu GitHub und PayPal führen zu Drittanbietern mit eigenen Datenschutzregeln.  
 Vollständige Angaben siehe Abschnitte oben (English is the full legal text).

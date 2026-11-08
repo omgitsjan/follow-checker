@@ -96,7 +96,78 @@ export function createStorage({ initial = {} } = {}) {
   return area;
 }
 
-export function createChrome({ storage = createStorage(), cookieReply } = {}) {
+/** Deliver one runtime message to a set of onMessage listeners, honouring async sendResponse. */
+function deliverTo(listeners, msg, sender) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const sendResponse = (res) => {
+      if (answered) return;
+      answered = true;
+      resolve(res === undefined ? undefined : structuredClone(res));
+    };
+    let keepOpen = false;
+    for (const fn of listeners) {
+      if (fn(structuredClone(msg), sender, sendResponse) === true) keepOpen = true;
+      if (answered) return;
+    }
+    if (!keepOpen) resolve(undefined);
+  });
+}
+
+/**
+ * The real background.js (MV3 service worker) in its own context. Only one
+ * instance is "alive" at a time; restart() drops it (in-memory state lost, as
+ * on SW suspend) and starts a fresh one on the same storage.
+ */
+export function createBus({ storage, clock }) {
+  const bus = { dropped: new Set(), background: null, instances: 0 };
+  const boot = () => {
+    const listeners = [];
+    const chrome = {
+      runtime: {
+        id: "test-extension",
+        getURL: (p) => `chrome-extension://test-extension/${p}`,
+        onMessage: { addListener: (fn) => listeners.push(fn) },
+      },
+      storage: { local: storage },
+      cookies: { get: async () => null },
+    };
+    class FakeDate extends Date {
+      constructor(...args) {
+        super(...(args.length ? args : [clock.now]));
+      }
+      static now() {
+        return clock.now;
+      }
+    }
+    const ctx = {
+      chrome,
+      console: { log() {}, warn() {}, error() {} },
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      Date: FakeDate,
+      structuredClone,
+    };
+    ctx.globalThis = ctx;
+    ctx.self = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(path.join(ROOT, "background.js"), "utf8"), ctx, { filename: "background.js" });
+    bus.instances += 1;
+    bus.background = { ctx, deliver: (msg, sender) => deliverTo(listeners, msg, sender) };
+  };
+  boot();
+  bus.restart = boot;
+  /** Message from an extension context to the service worker. */
+  bus.send = async (msg, sender) => {
+    if (sender.tab && bus.dropped.has(sender.tab.id)) {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    }
+    return bus.background.deliver(msg, sender);
+  };
+  return bus;
+}
+
+export function createChrome({ storage = createStorage(), cookieReply, bus, sender } = {}) {
   const listeners = [];
   const sent = [];
   const chrome = {
@@ -110,9 +181,12 @@ export function createChrome({ storage = createStorage(), cookieReply } = {}) {
       },
       async sendMessage(msg) {
         sent.push(structuredClone(msg));
-        if (msg?.type === "FC_IG_COOKIES") {
+        if (msg?.type === "FC_IG_COOKIES" && cookieReply !== undefined) {
           if (typeof cookieReply === "function") return cookieReply(msg);
-          return cookieReply ?? { ok: true, dsUserId: "", csrftoken: "" };
+          return cookieReply;
+        }
+        if (bus && typeof msg?.type === "string" && msg.type.startsWith("FC_")) {
+          return bus.send(msg, sender);
         }
         return undefined;
       },
@@ -178,7 +252,11 @@ export function jsonResponse(body, status = 200, headers = {}) {
 export function loadExtension(files, opts = {}) {
   const clock = opts.clock || new FakeClock();
   const storage = opts.storage || createStorage({ initial: opts.storageInitial });
-  const chrome = opts.chrome || createChrome({ storage, cookieReply: opts.cookieReply });
+  const bus = opts.bus || createBus({ storage, clock });
+  const pageUrl = opts.url || "https://www.instagram.com/";
+  const tabId = opts.tabId ?? 1;
+  const sender = { id: "test-extension", tab: { id: tabId, url: pageUrl }, frameId: 0, url: pageUrl };
+  const chrome = opts.chrome || createChrome({ storage, cookieReply: opts.cookieReply, bus, sender });
   const win = opts.window || createWindow();
   const fetchCalls = [];
   const fetchImpl =
@@ -208,7 +286,7 @@ export function loadExtension(files, opts = {}) {
     chrome,
     window: win,
     document,
-    location: { origin: "https://www.instagram.com", href: "https://www.instagram.com/", pathname: "/" },
+    location: { origin: new URL(pageUrl).origin, href: pageUrl, pathname: new URL(pageUrl).pathname },
     fetch,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
@@ -230,7 +308,7 @@ export function loadExtension(files, opts = {}) {
     vm.runInContext(code, ctx, { filename: file });
   }
   const run = (expr) => vm.runInContext(expr, ctx);
-  return { ctx, clock, storage, chrome, window: win, fetchCalls, run };
+  return { ctx, clock, storage, chrome, bus, tabId, window: win, fetchCalls, run };
 }
 
 /** Load ig-bridge.js in its own context (MAIN world) sharing the page window. */

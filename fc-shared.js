@@ -43,21 +43,25 @@ if (!globalThis.__fcSharedBoot) {
   /**
    * Analysis job lifecycle, shared by all content scripts and read by the popup.
    *
-   *   idle --start [no fresh job]--> running(stage, heartbeat) --ok--> succeeded
-   *                                                            \--error--> failed
-   *   running with a heartbeat older than STALE_MS = interrupted (tab closed or
-   *   reloaded mid-run); it no longer blocks a new start.
+   *   idle --claim (service worker grants lease)--> running(stage, heartbeat)
+   *        --finish ok--> succeeded | --finish error--> failed
+   *   running without heartbeat for STALE_MS = interrupted; the lease can be
+   *   taken over, and the old owner is fenced (its later writes are refused).
    *
-   * Storage (chrome.storage.local, one key per platform so platforms never
-   * overwrite each other):
+   * The background service worker is the only writer of these keys and
+   * serializes claim/heartbeat/finish (background.js), so two tabs can never
+   * both start a job for one platform. Content scripts only send messages.
+   * If the worker or storage is unavailable, a start fails closed.
+   *
+   * Keys (chrome.storage.local, one set per platform):
    *   fcJob:<platform>    { id, platform, kind, owner, status, stage, startedAt, heartbeatAt, endedAt, error }
-   *   fcResult:<platform> last *successful* result only
-   *   fcError:<platform>  last failure { error, at, jobId }, kept apart from the result
-   * Storage errors never wedge a job: the in-memory guard is always released.
+   *   fcResult:<platform> last *successful* analysis result only
+   *   fcError:<platform>  last analysis failure { error, at, jobId, kind }, short and sanitized
    */
   globalThis.fcJobs = (() => {
     const STALE_MS = 120000;
     const HEARTBEAT_MS = 15000;
+    const LEASE_LOST = "This analysis was taken over by a newer run.";
     const owner = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     let active = null;
 
@@ -81,23 +85,30 @@ if (!globalThis.__fcSharedBoot) {
       }
     }
 
-    async function write(items) {
+    async function lease(payload) {
       try {
-        await chrome.storage.local.set(items);
-        return true;
+        return (await chrome.runtime.sendMessage({ type: "FC_JOB", owner, ...payload })) || null;
       } catch {
-        return false;
+        return null; // worker unreachable
       }
     }
 
     function publicJob(job) {
       if (!job) return null;
-      const { heartbeatTimer, persist, ...rest } = job;
+      const { heartbeatTimer, fenced, ...rest } = job;
       return rest;
     }
 
-    /** Claim the single job slot of this content script (and of the platform, across tabs). */
-    async function start(platform, kind, { persist = true } = {}) {
+    async function beat(job) {
+      const res = await lease({ op: "heartbeat", platform: job.platform, jobId: job.id, stage: job.stage });
+      if (res?.fenced) {
+        job.fenced = true;
+        clearInterval(job.heartbeatTimer);
+      }
+    }
+
+    /** Claim the platform's job lease (extension-wide, via the service worker). */
+    async function start(platform, kind) {
       if (active) return { ok: false, busy: true, job: publicJob(active) };
       const now = Date.now();
       const job = {
@@ -109,46 +120,45 @@ if (!globalThis.__fcSharedBoot) {
         stage: "start",
         startedAt: now,
         heartbeatAt: now,
-        persist,
       };
-      active = job; // claimed synchronously: concurrent messages see it immediately
-      if (persist) {
-        const existing = await read(keys(platform).job);
-        if (existing && existing.owner !== owner && isActive(existing)) {
-          active = null;
-          return { ok: false, busy: true, job: existing };
-        }
-        await write({ [keys(platform).job]: publicJob(job) });
-        job.heartbeatTimer = setInterval(() => {
-          job.heartbeatAt = Date.now();
-          write({ [keys(platform).job]: publicJob(job) });
-        }, HEARTBEAT_MS);
+      active = job; // also blocks concurrent messages inside this tab right away
+      const res = await lease({ op: "claim", platform, kind, jobId: job.id });
+      if (!res?.ok) {
+        active = null;
+        if (res?.busy) return { ok: false, busy: true, job: res.job };
+        return {
+          ok: false,
+          error: "Could not reserve the analysis (extension background not reachable). Reload the tab and try again.",
+        };
       }
+      job.heartbeatTimer = setInterval(() => beat(job), HEARTBEAT_MS);
       return { ok: true, job };
     }
 
+    /** Stage update from the running work; throws once the lease was lost. */
     function progress(job, stage) {
-      if (!job || job.status !== "running") return;
-      const changed = stage && stage !== job.stage;
-      if (stage) job.stage = stage;
+      if (!job) return;
+      if (job.fenced) throw new Error(LEASE_LOST);
       job.heartbeatAt = Date.now();
-      if (job.persist && changed) write({ [keys(job.platform).job]: publicJob(job) });
+      if (stage && stage !== job.stage) {
+        job.stage = stage;
+        beat(job);
+      }
     }
 
+    /** End the job; returns the worker's answer ({ok}, {fenced} or null if unreachable). */
     async function finish(job, outcome) {
-      if (!job) return;
+      if (!job) return null;
       clearInterval(job.heartbeatTimer);
-      job.status = outcome.ok ? "succeeded" : "failed";
-      job.endedAt = Date.now();
-      if (!outcome.ok) job.error = outcome.error;
       try {
-        if (job.persist) {
-          const k = keys(job.platform);
-          const items = { [k.job]: publicJob(job) };
-          if (outcome.ok) items[k.result] = outcome.result;
-          else items[k.error] = { error: outcome.error, at: job.endedAt, jobId: job.id, kind: job.kind };
-          await write(items);
-        }
+        return await lease({
+          op: "finish",
+          platform: job.platform,
+          jobId: job.id,
+          ok: Boolean(outcome.ok),
+          result: outcome.ok ? outcome.result : undefined,
+          error: outcome.ok ? undefined : outcome.error,
+        });
       } finally {
         if (active === job) active = null;
       }
@@ -165,21 +175,24 @@ if (!globalThis.__fcSharedBoot) {
       };
       (async () => {
         let message;
+        let answer;
         try {
           const result = { ...(await work(report)), type: "RESULT", ok: true, platform, jobId: job.id };
-          await finish(job, { ok: true, result });
+          answer = await finish(job, { ok: true, result });
           message = result;
         } catch (err) {
           const error = err?.message || String(err);
-          await finish(job, { ok: false, error });
-          message = { type: "RESULT", ok: false, platform, jobId: job.id, error };
+          answer = await finish(job, { ok: false, error });
+          message = { type: "RESULT", ok: false, platform, jobId: job.id, error: answer?.error || error };
         }
+        // A fenced (expired and taken over) job stays silent; its data is stale.
+        if (answer?.fenced || job.fenced) return;
         chrome.runtime.sendMessage(message).catch(() => {});
       })();
       return { ok: true, started: true, jobId: job.id };
     }
 
-    return { STALE_MS, HEARTBEAT_MS, owner, keys, isActive, isInterrupted, read, write, start, progress, finish, runAnalysis, current: () => publicJob(active) };
+    return { STALE_MS, HEARTBEAT_MS, owner, keys, isActive, isInterrupted, read, start, progress, finish, runAnalysis, current: () => publicJob(active) };
   })();
 
   globalThis.fcCompareLists = function fcCompareLists(following, followers) {
@@ -280,7 +293,7 @@ if (!globalThis.__fcSharedBoot) {
             const payload = await handlers.analyze(report);
             return fcBuildResult(platform, payload.me, payload.following, payload.followers);
           })
-          .then((res) => sendResponse(res.ok ? res : { ...res, error: "Analysis already running." }));
+          .then((res) => sendResponse(res.ok || !res.busy ? res : { ...res, error: "Analysis already running." }));
         return true;
       }
 

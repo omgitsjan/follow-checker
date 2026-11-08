@@ -134,23 +134,13 @@ test("a fresh running job from another tab blocks a second run; a stale one does
   await runToResult(env);
 });
 
-test("storage write failures do not wedge the job: result still delivered, next run possible", async () => {
-  const storage = createStorage();
-  storage.failures.set = "QUOTA_BYTES quota exceeded";
-  const env = igEnv({ storage });
-  const res = await env.chrome.dispatch({ type: "ANALYZE" });
-  assert.equal(res.started, true);
-  const result = await runToResult(env);
-  assert.equal(result.ok, true);
-  const second = await env.chrome.dispatch({ type: "ANALYZE" });
-  assert.equal(second.started, true);
-  await runToResult(env, 2);
-});
+// Storage failures: see job-coordination.test.mjs (claim fails closed, finish keeps the lease until expiry).
 
 function githubEnv({ storageInitial = {}, fail = false } = {}) {
   const clock = new FakeClock();
   return loadExtension(["fc-shared.js", "github.js"], {
     clock,
+    url: "https://github.com/octo",
     window: createWindow(),
     storage: createStorage({ initial: storageInitial }),
     document: {
