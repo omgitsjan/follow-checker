@@ -48,6 +48,7 @@ const state = {
   jobAliveAt: 0,
   finishedAt: null,
   resultJobId: null,
+  resultAccountId: null,
   platformId: "instagram",
   resultPlatform: null,
   unfollowMode: "safe",
@@ -75,20 +76,44 @@ function safeUnfollowActive() {
   return state.unfollowMode !== "direct";
 }
 
+/*
+ * Opened-profile reminders: pendingManual["<platform>:<account>:<userId>"] =
+ * { action, at } where <account> is me.id of the shown result. Older builds
+ * stored "<platform>:<userId>" = action (no account): those are still shown
+ * and removed when you tap Done, but never auto-removed by an analysis.
+ */
+function pendingPlatform() {
+  return state.resultPlatform || state.platformId || "instagram";
+}
+
 function pendingKey(userId) {
-  return `${state.resultPlatform || state.platformId || "instagram"}:${userId}`;
+  const account = state.resultAccountId;
+  return account ? `${pendingPlatform()}:${account}:${userId}` : `${pendingPlatform()}:${userId}`;
+}
+
+function legacyPendingKey(userId) {
+  return `${pendingPlatform()}:${userId}`;
+}
+
+function pendingAction(userId) {
+  const value = state.pendingManual[pendingKey(userId)] ?? state.pendingManual[legacyPendingKey(userId)];
+  return typeof value === "string" ? value : value?.action || null;
 }
 
 function rememberPending(userId, action) {
-  state.pendingManual[pendingKey(userId)] = action;
+  state.pendingManual[pendingKey(userId)] = { action, at: Date.now() };
   chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
 }
 
 function forgetPending(userId) {
-  const key = pendingKey(userId);
-  if (!state.pendingManual[key]) return;
-  delete state.pendingManual[key];
-  chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
+  let changed = false;
+  for (const key of new Set([pendingKey(userId), legacyPendingKey(userId)])) {
+    if (key in state.pendingManual) {
+      delete state.pendingManual[key];
+      changed = true;
+    }
+  }
+  if (changed) chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
 }
 
 const BOT_SCORE_MIN = 25;
@@ -454,7 +479,7 @@ function renderBots() {
     removeBtn.type = "button";
     removeBtn.className = "btn action remove-follower";
     const manual = safeUnfollowActive();
-    const removePending = manual && state.pendingManual[pendingKey(u.id)] === "remove_follower";
+    const removePending = manual && pendingAction(u.id) === "remove_follower";
     removeBtn.textContent = removePending
       ? t("markRemoved")
       : manual
@@ -478,7 +503,7 @@ function renderBots() {
       const unf = document.createElement("button");
       unf.type = "button";
       unf.className = "btn action unfollow";
-      const unfollowPending = manual && state.pendingManual[pendingKey(u.id)] === "unfollow";
+      const unfollowPending = manual && pendingAction(u.id) === "unfollow";
       unf.textContent = unfollowPending
         ? t("markUnfollowed")
         : manual
@@ -736,7 +761,7 @@ function userCard(u, listKey) {
     btn.type = "button";
     btn.className = "btn action unfollow";
     const manualUnfollow = safeUnfollowActive();
-    const unfollowPending = manualUnfollow && state.pendingManual[pendingKey(u.id)] === "unfollow";
+    const unfollowPending = manualUnfollow && pendingAction(u.id) === "unfollow";
     btn.textContent = unfollowPending
       ? t("markUnfollowed")
       : manualUnfollow
@@ -841,7 +866,7 @@ async function handleFriendship(u, action, listKey, btn, row) {
     (action === "unfollow" || action === "remove_follower") && safeUnfollowActive();
   if (manual) {
     try {
-      if (btn.dataset.opened === "1" || state.pendingManual[pendingKey(u.id)] === action) {
+      if (btn.dataset.opened === "1" || pendingAction(u.id) === action) {
         btn.disabled = true;
         if (action === "remove_follower") commitRemoveFollower(u, row, { manual: true });
         else commitUnfollow(u, listKey, row, { manual: true });
@@ -1035,8 +1060,9 @@ async function persistState() {
   };
   // Written by the service worker, and only if the stored result is still the
   // one this edit is based on (a newer analysis is never overwritten).
+  let res = null;
   try {
-    await chrome.runtime.sendMessage({
+    res = await chrome.runtime.sendMessage({
       type: "FC_RESULT_EDIT",
       platform,
       baseJobId: state.resultJobId,
@@ -1044,8 +1070,17 @@ async function persistState() {
       result,
     });
   } catch {
-    /* worker unreachable: the edit stays on screen only */
+    res = null; // worker unreachable
   }
+  if (res?.ok) return;
+  if (res?.stale) {
+    // A newer analysis was stored meanwhile: show it instead of the outdated edit.
+    const current = await fcJobs.read(fcJobs.keys(platform).result);
+    if (current?.ok) onResult(current, { keepTab: true, restored: true });
+    setStatus(t("editStale"), "error");
+    return;
+  }
+  setStatus(t("editNotSaved"), "error");
 }
 
 function filtered(list) {
@@ -1344,18 +1379,24 @@ async function readRestoreSnapshot() {
   return { result, error, running, interrupted, legacyImpersonating: Boolean(legacy?.impersonating) };
 }
 
-/** Opened-profile reminders that a fresh analysis already resolved are dropped. */
-function reconcilePendingManual(platform, following, followers) {
+/**
+ * Opened-profile reminders of this account that an analysis finished *after*
+ * the reminder was created can confirm are dropped (same rule for live and
+ * restored results). Reminders of other accounts and legacy entries stay.
+ */
+function reconcilePendingManual(platform, accountId, finishedAt, following, followers) {
+  if (!platform || !accountId || !finishedAt) return;
+  const prefix = `${platform}:${accountId}:`;
   const followingIds = new Set((following || []).map((u) => u.id));
   const followerIds = new Set((followers || []).map((u) => u.id));
   let changed = false;
-  for (const [key, action] of Object.entries(state.pendingManual)) {
-    const sep = key.indexOf(":");
-    if (key.slice(0, sep) !== platform) continue;
-    const id = key.slice(sep + 1);
+  for (const [key, value] of Object.entries(state.pendingManual)) {
+    if (!key.startsWith(prefix) || !value || typeof value !== "object") continue;
+    if (!(value.at < finishedAt)) continue;
+    const id = key.slice(prefix.length);
     const resolved =
-      (action === "unfollow" && !followingIds.has(id)) ||
-      (action === "remove_follower" && !followerIds.has(id));
+      (value.action === "unfollow" && !followingIds.has(id)) ||
+      (value.action === "remove_follower" && !followerIds.has(id));
     if (resolved) {
       delete state.pendingManual[key];
       changed = true;
@@ -1364,9 +1405,17 @@ function reconcilePendingManual(platform, following, followers) {
   if (changed) chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
 }
 
+/** Live PROGRESS/RESULT: only the tracked job, or (when idle) a job of the selected platform. */
+function acceptsJobMessage(msg) {
+  if (!msg?.jobId) return false;
+  if (state.jobId) return msg.jobId === state.jobId;
+  return msg.platform === state.platformId;
+}
+
 function onProgress(msg) {
-  if (msg.jobId && !state.analysisRunning) enterRunningState({ id: msg.jobId, platform: msg.platform });
-  if (msg.jobId && msg.jobId === state.jobId) state.jobAliveAt = Date.now();
+  if (!acceptsJobMessage(msg)) return;
+  if (!state.analysisRunning) enterRunningState({ id: msg.jobId, platform: msg.platform });
+  state.jobAliveAt = Date.now();
   setProgressUi(true);
   if (msg.stage === "user" && msg.me) {
     state.me = msg.me;
@@ -1406,8 +1455,11 @@ function onProgress(msg) {
 }
 
 function onResult(msg, { keepTab = false, restored = false } = {}) {
-  // Only the job we are waiting for ends the running state.
-  if (!restored && (!state.jobId || !msg.jobId || msg.jobId === state.jobId)) leaveRunningState();
+  // Live messages: only the job we are waiting for (or one of the selected platform).
+  if (!restored) {
+    if (!acceptsJobMessage(msg)) return;
+    leaveRunningState();
+  }
 
   if (!msg.ok) {
     // Failure never replaces the lists on screen; it is reported next to them.
@@ -1432,7 +1484,8 @@ function onResult(msg, { keepTab = false, restored = false } = {}) {
   state.counts = msg.counts;
   state.finishedAt = msg.finishedAt || null;
   state.resultJobId = msg.jobId || null;
-  if (!restored) reconcilePendingManual(state.resultPlatform, state.following, state.followers);
+  state.resultAccountId = msg.me?.id || null;
+  reconcilePendingManual(state.resultPlatform, state.resultAccountId, state.finishedAt, state.following, state.followers);
 
   // Older cached results may lack full lists — rebuild when possible
   if (!state.following.length && state.mutual.length) {

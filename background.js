@@ -177,8 +177,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg?.type === "FC_RESULT_EDIT") {
+    // Only the extension's own popup page (as popup or opened in a tab); content
+    // scripts report the web page URL and are refused.
     const fromPopup =
-      sender?.id === chrome.runtime.id && !sender.tab && String(sender.url || "").startsWith(chrome.runtime.getURL("popup.html"));
+      sender?.id === chrome.runtime.id && String(sender.url || "").startsWith(chrome.runtime.getURL("popup.html"));
     if (!fromPopup || !JOB_PLATFORM_URLS[msg.platform]) {
       sendResponse({ ok: false, error: "not allowed" });
       return false;

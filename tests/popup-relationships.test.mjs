@@ -104,14 +104,23 @@ test("a fresh analysis resolves opened-profile reminders it can confirm, keeps t
     clock,
     storageInitial: {
       "fcResult:instagram": base(),
-      pendingManual: { "instagram:2": "unfollow", "instagram:1": "unfollow", "github:2": "unfollow" },
+      // keyed "<platform>:<account>:<user>" (M2); created before the fresh analysis
+      pendingManual: {
+        "instagram:12345:2": { action: "unfollow", at: T0 - 1000 },
+        "instagram:12345:1": { action: "unfollow", at: T0 - 1000 },
+        "github:12345:2": { action: "unfollow", at: T0 - 1000 },
+      },
     },
   });
   // New analysis: bob is gone from following (really unfollowed), alice is still followed.
   const fresh = { ...base(), following: [A, D], notFollowingBack: [], counts: { ...base().counts, following: 2, notFollowingBack: 0 }, finishedAt: T0, jobId: "j2" };
   await p.deliver(fresh);
-  assert.deepEqual(p.run("state.pendingManual"), { "instagram:1": "unfollow", "github:2": "unfollow" });
-  assert.deepEqual(p.storage.data.pendingManual, { "instagram:1": "unfollow", "github:2": "unfollow" });
+  const kept = {
+    "instagram:12345:1": { action: "unfollow", at: T0 - 1000 },
+    "github:12345:2": { action: "unfollow", at: T0 - 1000 },
+  };
+  assert.deepEqual(p.run("state.pendingManual"), kept);
+  assert.deepEqual(p.storage.data.pendingManual, kept);
 });
 
 test("a local edit never overwrites a newer analysis result stored meanwhile", async () => {

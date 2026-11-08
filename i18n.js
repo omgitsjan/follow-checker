@@ -75,6 +75,10 @@ const I18N = {
     analysisInProgress: "Analysis in progress on {platform}…",
     lastRunFailed: "Last {platform} analysis failed: {error}",
     lastRunKeptHint: " The previous result is still shown.",
+    editStale:
+      "Your local change was not saved: a newer analysis was stored meanwhile. The current result is shown.",
+    editNotSaved:
+      "Your local change was not saved (extension background not reachable or storage full). It is only shown until the popup closes.",
     lastRunInterrupted:
       "The last {platform} analysis was interrupted (tab closed or reloaded). Start again when ready.",
     navRelationships: "Relationships",
@@ -238,6 +242,10 @@ const I18N = {
     analysisInProgress: "Analyse läuft auf {platform}…",
     lastRunFailed: "Letzte {platform}-Analyse fehlgeschlagen: {error}",
     lastRunKeptHint: " Das vorherige Ergebnis bleibt sichtbar.",
+    editStale:
+      "Deine lokale Änderung wurde nicht gespeichert: Inzwischen liegt eine neuere Analyse vor. Das aktuelle Ergebnis wird angezeigt.",
+    editNotSaved:
+      "Deine lokale Änderung wurde nicht gespeichert (Erweiterungs-Hintergrund nicht erreichbar oder Speicher voll). Sie ist nur sichtbar, bis das Popup schließt.",
     lastRunInterrupted:
       "Die letzte {platform}-Analyse wurde unterbrochen (Tab geschlossen oder neu geladen). Starte sie bei Bedarf neu.",
     navRelationships: "Beziehungen",
