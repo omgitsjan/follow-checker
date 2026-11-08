@@ -8,9 +8,31 @@ const PAGE_SIZE = 50;
 const DELAY_MS = 900; // Pause zwischen Seiten, um Rate-Limits zu vermeiden
 
 let igWwwClaim = "";
-let igBridgeState = "unknown";
 let igCsrfToken = "";
-let igCookieLookupDone = false;
+
+/**
+ * Page bridge (ig-bridge.js, MAIN world) presence:
+ *   unknown --PONG--> ok
+ *   unknown --no PONG in BRIDGE_PING_TIMEOUT_MS--> missing (direct fetch)
+ *   missing --after BRIDGE_MISSING_TTL_MS, next request--> re-probed
+ *   ok --bridged request timed out--> unknown (re-probed next time)
+ * Presence is probed with a cheap FC_PING, never inferred from how long a real
+ * Instagram request takes. One probe at a time (shared promise).
+ */
+const BRIDGE_PING_TIMEOUT_MS = 1500;
+const BRIDGE_MISSING_TTL_MS = 30000;
+const BRIDGE_FETCH_TIMEOUT_MS = 20000;
+const igBridge = { state: "unknown", checkedAt: 0, probe: null };
+
+/**
+ * HttpOnly cookie lookup via the service worker: single flight; only a lookup
+ * that produced a csrftoken stops further lookups. Failures / empty answers are
+ * retried after a backoff instead of being sticky for the whole page.
+ */
+const COOKIE_RETRY_AFTER_FAIL_MS = 10000;
+const COOKIE_RETRY_AFTER_EMPTY_MS = 60000;
+const COOKIE_LOOKUP_TIMEOUT_MS = 5000;
+const igCookieLookup = { inflight: null, retryAt: 0 };
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -71,46 +93,68 @@ function igHeaders() {
   return headers;
 }
 
-function pageFetch(url, options) {
-  if (igBridgeState === "missing") {
-    return Promise.reject(new Error("bridge-missing"));
-  }
-  return new Promise((resolve, reject) => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function newBridgeId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** Ask the page bridge once and wait for a reply with a matching id (or null on timeout). */
+function bridgeRequest(message, timeoutMs) {
+  return new Promise((resolve) => {
+    const id = newBridgeId();
     const timer = setTimeout(() => {
       window.removeEventListener("message", onMessage);
-      if (igBridgeState !== "ok") igBridgeState = "missing";
-      reject(new Error("bridge-missing"));
-    }, igBridgeState === "ok" ? 20000 : 1500);
-
+      resolve(null);
+    }, timeoutMs);
     function onMessage(event) {
       if (event.source !== window) return;
       const data = event.data;
       if (!data || data.source !== "fc-bridge" || data.id !== id) return;
       clearTimeout(timer);
       window.removeEventListener("message", onMessage);
-      if (data.error) {
-        reject(new Error(data.error));
-        return;
-      }
-      igBridgeState = "ok";
       resolve(data);
     }
-
     window.addEventListener("message", onMessage);
-    window.postMessage(
-      {
-        source: "fc-content",
-        type: "FC_FETCH",
-        id,
-        url,
-        method: options.method || "GET",
-        headers: options.headers || {},
-        body: options.body || null,
-      },
-      location.origin
-    );
+    window.postMessage({ source: "fc-content", ...message, id }, location.origin);
   });
+}
+
+/** true if the page bridge is usable right now (probes at most once per TTL). */
+function ensureBridge() {
+  if (igBridge.state === "ok") return Promise.resolve(true);
+  if (igBridge.state === "missing" && Date.now() - igBridge.checkedAt < BRIDGE_MISSING_TTL_MS) {
+    return Promise.resolve(false);
+  }
+  if (!igBridge.probe) {
+    igBridge.probe = bridgeRequest({ type: "FC_PING" }, BRIDGE_PING_TIMEOUT_MS).then((reply) => {
+      igBridge.probe = null;
+      igBridge.checkedAt = Date.now();
+      igBridge.state = reply ? "ok" : "missing";
+      return Boolean(reply);
+    });
+  }
+  return igBridge.probe;
+}
+
+async function pageFetch(url, options) {
+  if (!(await ensureBridge())) throw new Error("bridge-missing");
+  const reply = await bridgeRequest(
+    {
+      type: "FC_FETCH",
+      url,
+      method: options.method || "GET",
+      headers: options.headers || {},
+      body: options.body || null,
+    },
+    BRIDGE_FETCH_TIMEOUT_MS
+  );
+  if (!reply) {
+    // The page may still be executing the request: re-probe next time and
+    // tell the caller it timed out (it must not blindly replay non-GETs).
+    igBridge.state = "unknown";
+    throw new Error("bridge-timeout");
+  }
+  if (reply.error) throw new Error(reply.error);
+  return reply;
 }
 
 function parseIgBody(status, text) {
@@ -147,7 +191,9 @@ function parseIgBody(status, text) {
 
 async function igFetch(url, options = {}) {
   const method = options.method || "GET";
-  if (!getCookie("csrftoken") && !igCsrfToken && !igCookieLookupDone) await getIgCookies();
+  if (!getCookie("csrftoken") && !igCsrfToken && (igCookieLookup.inflight || Date.now() >= igCookieLookup.retryAt)) {
+    await getIgCookies();
+  }
   const headers = {
     ...igHeaders(),
     ...(options.headers || {}),
@@ -161,18 +207,21 @@ async function igFetch(url, options = {}) {
     status = bridged.status;
     text = bridged.text || "";
     responseHeaders = bridged.headers || {};
+    fcJobs.touch(); // a finished request is progress for the job watchdog
   } catch (err) {
-    if (err?.message !== "bridge-missing") throw err;
-    const res = await fetch(url, {
-      method,
-      credentials: "include",
-      headers,
-      body: options.body,
-      referrer: location.href,
-    });
+    const reason = err?.message;
+    if (reason === "bridge-timeout" && method !== "GET") {
+      throw new Error("Instagram request timed out. Check the tab before trying again.");
+    }
+    if (reason !== "bridge-missing" && reason !== "bridge-timeout") throw err;
+    const res = await fcFetchText(
+      url,
+      { method, credentials: "include", headers, body: options.body, referrer: location.href },
+      { label: "Instagram request" }
+    );
     status = res.status;
-    text = await res.text();
-    const claim = res.headers.get("x-ig-set-www-claim");
+    text = res.text;
+    const claim = res.headers?.get?.("x-ig-set-www-claim");
     if (claim) responseHeaders["x-ig-set-www-claim"] = claim;
   }
 
@@ -289,6 +338,36 @@ function decodeJsonString(raw) {
   }
 }
 
+/** Ask the service worker for HttpOnly cookies (one request in flight at a time). */
+function lookupIgCookiesInBackground() {
+  if (!igCookieLookup.inflight) {
+    igCookieLookup.inflight = (async () => {
+      let res = null;
+      let timer;
+      try {
+        // Bounded: an unanswered message must not stall the caller.
+        res = await Promise.race([
+          chrome.runtime.sendMessage({ type: "FC_IG_COOKIES" }),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(null), COOKIE_LOOKUP_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        /* background not reachable (e.g. extension reloaded) */
+      } finally {
+        clearTimeout(timer);
+      }
+      const ok = Boolean(res?.ok);
+      if (ok && res.csrftoken) igCsrfToken = res.csrftoken;
+      igCookieLookup.retryAt =
+        Date.now() + (ok ? COOKIE_RETRY_AFTER_EMPTY_MS : COOKIE_RETRY_AFTER_FAIL_MS);
+      igCookieLookup.inflight = null;
+      return ok ? res : null;
+    })();
+  }
+  return igCookieLookup.inflight;
+}
+
 /** ds_user_id / csrftoken – document.cookie first, then the extension cookie API (HttpOnly-safe). */
 async function getIgCookies() {
   const out = {
@@ -296,15 +375,10 @@ async function getIgCookies() {
     csrftoken: getCookie("csrftoken") || igCsrfToken || "",
   };
   if (!isIgUserId(out.dsUserId) || !out.csrftoken) {
-    igCookieLookupDone = true;
-    try {
-      const res = await chrome.runtime.sendMessage({ type: "FC_IG_COOKIES" });
-      if (res?.ok) {
-        if (!isIgUserId(out.dsUserId) && isIgUserId(res.dsUserId)) out.dsUserId = res.dsUserId;
-        if (!out.csrftoken && res.csrftoken) out.csrftoken = res.csrftoken;
-      }
-    } catch {
-      /* background not reachable (e.g. extension reloaded) */
+    const res = await lookupIgCookiesInBackground();
+    if (res) {
+      if (!isIgUserId(out.dsUserId) && isIgUserId(res.dsUserId)) out.dsUserId = res.dsUserId;
+      if (!out.csrftoken && res.csrftoken) out.csrftoken = res.csrftoken;
     }
   }
   if (!isIgUserId(out.dsUserId)) out.dsUserId = "";
@@ -313,25 +387,10 @@ async function getIgCookies() {
 }
 
 /** Viewer data from the page's own JS modules (MAIN world via ig-bridge.js). */
-function bridgeViewer() {
-  if (igBridgeState === "missing") return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const timer = setTimeout(() => {
-      window.removeEventListener("message", onMessage);
-      resolve(null);
-    }, 1500);
-    function onMessage(event) {
-      if (event.source !== window) return;
-      const data = event.data;
-      if (!data || data.source !== "fc-bridge" || data.id !== id) return;
-      clearTimeout(timer);
-      window.removeEventListener("message", onMessage);
-      resolve(data.viewer || null);
-    }
-    window.addEventListener("message", onMessage);
-    window.postMessage({ source: "fc-content", type: "FC_VIEWER", id }, location.origin);
-  });
+async function bridgeViewer() {
+  if (!(await ensureBridge())) return null;
+  const reply = await bridgeRequest({ type: "FC_VIEWER" }, BRIDGE_PING_TIMEOUT_MS);
+  return reply?.viewer || null;
 }
 
 /** Viewer data from inline JSON Instagram ships with the page. */
@@ -988,6 +1047,7 @@ async function fetchList(userId, type, onProgress, expectedCount = null) {
   let variant = "plain";
   const expected = Number(expectedCount);
   const expectSome = Number.isFinite(expected) && expected > 0;
+  const guard = fcPageGuard(`Instagram ${type}`);
 
   do {
     page += 1;
@@ -1015,11 +1075,13 @@ async function fetchList(userId, type, onProgress, expectedCount = null) {
       );
     }
 
+    const before = results.length;
     for (const user of payload.users.map(mapUser)) {
       if (!user.id || seen.has(user.id)) continue;
       seen.add(user.id);
       results.push(user);
     }
+    guard.check(payload.next, results.length - before, results.length);
 
     if (onProgress) {
       onProgress({
@@ -1106,7 +1168,13 @@ async function enrichUsersWithCounts(users, onProgress, { max = 120, delayMs = 5
   });
   const slice = targets.slice(0, max);
   let ok = 0;
-  for (let i = 0; i < slice.length; i++) {
+  // Enrichment is optional. A 429 ends it right away (respect the rate limit);
+  // the lists themselves stay valid, just with fewer counts.
+  let rateLimited = false;
+  const noteError = (err) => {
+    if (/\(429\)|HTTP 429/.test(String(err?.message || err))) rateLimited = true;
+  };
+  for (let i = 0; i < slice.length && !rateLimited; i++) {
     const u = slice[i];
     let got = false;
     // 1) web_profile_info (public profiles)
@@ -1115,20 +1183,21 @@ async function enrichUsersWithCounts(users, onProgress, { max = 120, delayMs = 5
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(u.username)}`
       );
       got = applyProfileInfoToUser(u, data?.data?.user);
-    } catch {
-      /* try next */
+    } catch (err) {
+      noteError(err);
     }
     // 2) users/{id}/info fallback
-    if (!got && u.id) {
+    if (!got && u.id && !rateLimited) {
       try {
         const data = await igFetch(
           `https://www.instagram.com/api/v1/users/${encodeURIComponent(u.id)}/info/`
         );
         got = applyProfileInfoToUser(u, data?.user);
-      } catch {
-        /* skip */
+      } catch (err) {
+        noteError(err);
       }
     }
+    if (rateLimited) break;
     if (got) ok += 1;
     if (onProgress) {
       onProgress({ enriched: i + 1, total: slice.length, ok });
@@ -1138,34 +1207,43 @@ async function enrichUsersWithCounts(users, onProgress, { max = 120, delayMs = 5
   return users;
 }
 
-function compareLists(following, followers) {
-  const followerIds = new Set(followers.map((u) => u.id));
-  const followingIds = new Set(following.map((u) => u.id));
+/** Full relationship analysis. `report` sends PROGRESS and keeps the job heartbeat fresh. */
+async function runInstagramAnalysis(report) {
+  const me = await getCurrentUser();
+  report({ stage: "user", me });
 
-  const mutual = [];
-  const notFollowingBack = [];
-  const notFollowedByMe = [];
+  report({ stage: "following", loaded: 0, total: me.followingCount });
+  const following = await fetchList(
+    me.id,
+    "following",
+    (p) => report({ stage: "following", loaded: p.loaded, total: me.followingCount }),
+    me.followingCount
+  );
 
-  for (const u of following) {
-    if (followerIds.has(u.id)) mutual.push(u);
-    else notFollowingBack.push(u);
-  }
+  report({ stage: "followers", loaded: 0, total: me.followersCount });
+  const followers = await fetchList(
+    me.id,
+    "followers",
+    (p) => report({ stage: "followers", loaded: p.loaded, total: me.followersCount }),
+    me.followersCount
+  );
 
-  for (const u of followers) {
-    if (!followingIds.has(u.id)) notFollowedByMe.push(u);
-  }
+  // Light enrich for bots heuristics only (charts use list buckets, no counts needed)
+  await enrichUsersWithCounts(
+    followers,
+    (p) =>
+      report({
+        stage: "enrich",
+        target: "followers",
+        enriched: p.enriched,
+        total: p.total,
+        ok: p.ok,
+      }),
+    { max: 40, delayMs: 450 }
+  );
 
-  const byName = (a, b) =>
-    a.username.localeCompare(b.username, undefined, { sensitivity: "base" });
-
-  mutual.sort(byName);
-  notFollowingBack.sort(byName);
-  notFollowedByMe.sort(byName);
-
-  return { mutual, notFollowingBack, notFollowedByMe };
+  return fcBuildResult("instagram", me, following, followers);
 }
-
-let running = false;
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "PING") {
@@ -1211,8 +1289,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     msg?.type === "ANALYZE_OWN_POSTS"
   ) {
     (async () => {
+      // Shares the single job slot with ANALYZE so both never hit Instagram in parallel.
+      const claim = await fcJobs.start("instagram", "posts");
+      if (!claim.ok) {
+        sendResponse(claim.busy ? { ...claim, error: "Analysis already running." } : claim);
+        return;
+      }
+      const job = claim.job;
+      let outcome = { ok: false, error: "aborted" };
       try {
         const onProgress = (p) => {
+          fcJobs.progress(job, "posts");
           chrome.runtime
             .sendMessage({
               type: "PROGRESS",
@@ -1228,6 +1315,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           maxPostsForLikers: msg.maxPostsForLikers ?? 12,
         });
 
+        outcome = { ok: true };
         sendResponse({
           ok: true,
           posts: result.posts,
@@ -1238,7 +1326,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           finishedAt: Date.now(),
         });
       } catch (err) {
-        sendResponse({ ok: false, error: err?.message || String(err) });
+        outcome = { ok: false, error: err?.message || String(err) };
+        sendResponse({ ok: false, error: outcome.error });
+      } finally {
+        await fcJobs.finish(job, outcome);
       }
     })();
     return true;
@@ -1257,122 +1348,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg?.type === "ANALYZE") {
-    if (running) {
-      sendResponse({ ok: false, error: "Analysis already running." });
-      return false;
-    }
-
-    running = true;
-    (async () => {
-      try {
-        const me = await getCurrentUser();
-
-        chrome.runtime
-          .sendMessage({
-            type: "PROGRESS",
-            stage: "user",
-            me,
-          })
-          .catch(() => {});
-
-        const following = await fetchList(
-          me.id,
-          "following",
-          (p) => {
-            chrome.runtime
-              .sendMessage({
-                type: "PROGRESS",
-                stage: "following",
-                loaded: p.loaded,
-                total: me.followingCount,
-              })
-              .catch(() => {});
-          },
-          me.followingCount
-        );
-
-        const followers = await fetchList(
-          me.id,
-          "followers",
-          (p) => {
-            chrome.runtime
-              .sendMessage({
-                type: "PROGRESS",
-                stage: "followers",
-                loaded: p.loaded,
-                total: me.followersCount,
-              })
-              .catch(() => {});
-          },
-          me.followersCount
-        );
-
-        // Light enrich for bots heuristics only (charts use list buckets, no counts needed)
-        await enrichUsersWithCounts(
-          followers,
-          (p) => {
-            chrome.runtime
-              .sendMessage({
-                type: "PROGRESS",
-                stage: "enrich",
-                target: "followers",
-                enriched: p.enriched,
-                total: p.total,
-                ok: p.ok,
-              })
-              .catch(() => {});
-          },
-          { max: 40, delayMs: 450 }
-        );
-
-        const lists = compareLists(following, followers);
-        const result = {
-          type: "RESULT",
-          ok: true,
-          platform: "instagram",
-          me,
-          counts: {
-            following: following.length,
-            followers: followers.length,
-            mutual: lists.mutual.length,
-            notFollowingBack: lists.notFollowingBack.length,
-            notFollowedByMe: lists.notFollowedByMe.length,
-          },
-          following,
-          followers,
-          mutual: lists.mutual,
-          notFollowingBack: lists.notFollowingBack,
-          notFollowedByMe: lists.notFollowedByMe,
-          finishedAt: Date.now(),
-        };
-
-        // Persist if popup was closed
-        try {
-          await chrome.storage.local.set({ lastResult: result });
-        } catch {
-          /* ignore */
-        }
-
-        chrome.runtime.sendMessage(result).catch(() => {});
-      } catch (err) {
-        const fail = {
-          type: "RESULT",
-          ok: false,
-          error: err?.message || String(err),
-        };
-        try {
-          await chrome.storage.local.set({ lastResult: fail });
-        } catch {
-          /* ignore */
-        }
-        chrome.runtime.sendMessage(fail).catch(() => {});
-      } finally {
-        running = false;
-      }
-    })();
-
-    sendResponse({ ok: true, started: true });
-    return false;
+    fcJobs
+      .runAnalysis("instagram", (report) => runInstagramAnalysis(report))
+      .then((res) => sendResponse(res.ok || !res.busy ? res : { ...res, error: "Analysis already running." }));
+    return true; // async sendResponse
   }
 
   return false;

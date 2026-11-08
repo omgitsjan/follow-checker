@@ -72,6 +72,15 @@ const I18N = {
     progressLiked: "Posts loaded: {loaded}",
     totalApprox: " / ~{n}",
     analysisRunning: "Analysis already running.",
+    analysisInProgress: "Analysis in progress on {platform}…",
+    lastRunFailed: "Last {platform} analysis failed: {error}",
+    lastRunKeptHint: " The previous result is still shown.",
+    editStale:
+      "Your local change was not saved: a newer analysis was stored meanwhile. The current result is shown.",
+    editNotSaved:
+      "Your local change was not saved (extension background not reachable or storage full). It is only shown until the popup closes.",
+    lastRunInterrupted:
+      "The last {platform} analysis was interrupted (tab closed or reloaded). Start again when ready.",
     navRelationships: "Relationships",
     navAnalytics: "Analytics",
     navBots: "Bots",
@@ -149,6 +158,10 @@ const I18N = {
     markUnfollowed: "Done",
     markRemoved: "Done",
     markUnfollowedHint: "Unfollowed @{user} yourself? Tap to update this list locally.",
+    markedUnfollowed:
+      "Marked <strong>@{user}</strong> as unfollowed in this list. Not checked with the site, a new analysis confirms it.",
+    markedRemoved:
+      "Marked <strong>@{user}</strong> as removed from your followers in this list. Not checked with the site, a new analysis confirms it.",
     openedToUnfollow:
       "Opened <strong>@{user}</strong>. Unfollow them on the page, then tap Done.",
     openedToRemove:
@@ -226,6 +239,15 @@ const I18N = {
     progressLiked: "Posts geladen: {loaded}",
     totalApprox: " / ~{n}",
     analysisRunning: "Analyse läuft bereits.",
+    analysisInProgress: "Analyse läuft auf {platform}…",
+    lastRunFailed: "Letzte {platform}-Analyse fehlgeschlagen: {error}",
+    lastRunKeptHint: " Das vorherige Ergebnis bleibt sichtbar.",
+    editStale:
+      "Deine lokale Änderung wurde nicht gespeichert: Inzwischen liegt eine neuere Analyse vor. Das aktuelle Ergebnis wird angezeigt.",
+    editNotSaved:
+      "Deine lokale Änderung wurde nicht gespeichert (Erweiterungs-Hintergrund nicht erreichbar oder Speicher voll). Sie ist nur sichtbar, bis das Popup schließt.",
+    lastRunInterrupted:
+      "Die letzte {platform}-Analyse wurde unterbrochen (Tab geschlossen oder neu geladen). Starte sie bei Bedarf neu.",
     navRelationships: "Beziehungen",
     navAnalytics: "Analytics",
     navBots: "Bots",
@@ -303,6 +325,10 @@ const I18N = {
     markUnfollowed: "Erledigt",
     markRemoved: "Erledigt",
     markUnfollowedHint: "Du hast @{user} selbst entfolgt? Tippen aktualisiert nur diese Liste.",
+    markedUnfollowed:
+      "<strong>@{user}</strong> in dieser Liste als entfolgt markiert. Nicht mit der Seite abgeglichen, eine neue Analyse bestätigt es.",
+    markedRemoved:
+      "<strong>@{user}</strong> in dieser Liste als entfernt markiert. Nicht mit der Seite abgeglichen, eine neue Analyse bestätigt es.",
     openedToUnfollow:
       "Profil von <strong>@{user}</strong> geöffnet. Entfolge dort selbst, dann tippe auf Erledigt.",
     openedToRemove:

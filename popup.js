@@ -42,6 +42,13 @@ const state = {
   analysisRuns: 0,
   postsLoads: 0,
   analysisRunning: false,
+  // Job being shown as running (reconstructed from storage after a reopen).
+  jobId: null,
+  jobPlatform: null,
+  jobAliveAt: 0,
+  finishedAt: null,
+  resultJobId: null,
+  resultAccountId: null,
   platformId: "instagram",
   resultPlatform: null,
   unfollowMode: "safe",
@@ -69,20 +76,44 @@ function safeUnfollowActive() {
   return state.unfollowMode !== "direct";
 }
 
+/*
+ * Opened-profile reminders: pendingManual["<platform>:<account>:<userId>"] =
+ * { action, at } where <account> is me.id of the shown result. Older builds
+ * stored "<platform>:<userId>" = action (no account): those are still shown
+ * and removed when you tap Done, but never auto-removed by an analysis.
+ */
+function pendingPlatform() {
+  return state.resultPlatform || state.platformId || "instagram";
+}
+
 function pendingKey(userId) {
-  return `${state.resultPlatform || state.platformId || "instagram"}:${userId}`;
+  const account = state.resultAccountId;
+  return account ? `${pendingPlatform()}:${account}:${userId}` : `${pendingPlatform()}:${userId}`;
+}
+
+function legacyPendingKey(userId) {
+  return `${pendingPlatform()}:${userId}`;
+}
+
+function pendingAction(userId) {
+  const value = state.pendingManual[pendingKey(userId)] ?? state.pendingManual[legacyPendingKey(userId)];
+  return typeof value === "string" ? value : value?.action || null;
 }
 
 function rememberPending(userId, action) {
-  state.pendingManual[pendingKey(userId)] = action;
+  state.pendingManual[pendingKey(userId)] = { action, at: Date.now() };
   chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
 }
 
 function forgetPending(userId) {
-  const key = pendingKey(userId);
-  if (!state.pendingManual[key]) return;
-  delete state.pendingManual[key];
-  chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
+  let changed = false;
+  for (const key of new Set([pendingKey(userId), legacyPendingKey(userId)])) {
+    if (key in state.pendingManual) {
+      delete state.pendingManual[key];
+      changed = true;
+    }
+  }
+  if (changed) chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
 }
 
 const BOT_SCORE_MIN = 25;
@@ -448,7 +479,7 @@ function renderBots() {
     removeBtn.type = "button";
     removeBtn.className = "btn action remove-follower";
     const manual = safeUnfollowActive();
-    const removePending = manual && state.pendingManual[pendingKey(u.id)] === "remove_follower";
+    const removePending = manual && pendingAction(u.id) === "remove_follower";
     removeBtn.textContent = removePending
       ? t("markRemoved")
       : manual
@@ -472,7 +503,7 @@ function renderBots() {
       const unf = document.createElement("button");
       unf.type = "button";
       unf.className = "btn action unfollow";
-      const unfollowPending = manual && state.pendingManual[pendingKey(u.id)] === "unfollow";
+      const unfollowPending = manual && pendingAction(u.id) === "unfollow";
       unf.textContent = unfollowPending
         ? t("markUnfollowed")
         : manual
@@ -730,7 +761,7 @@ function userCard(u, listKey) {
     btn.type = "button";
     btn.className = "btn action unfollow";
     const manualUnfollow = safeUnfollowActive();
-    const unfollowPending = manualUnfollow && state.pendingManual[pendingKey(u.id)] === "unfollow";
+    const unfollowPending = manualUnfollow && pendingAction(u.id) === "unfollow";
     btn.textContent = unfollowPending
       ? t("markUnfollowed")
       : manualUnfollow
@@ -768,7 +799,7 @@ function userCard(u, listKey) {
   return row;
 }
 
-function commitRemoveFollower(u, row) {
+function commitRemoveFollower(u, row, { manual = false } = {}) {
   forgetPending(u.id);
   removeUserFromLists(u.id, ["followers", "mutual", "notMe", "notFollowedByMe"]);
   if (state.following.some((x) => x.id === u.id)) {
@@ -785,7 +816,8 @@ function commitRemoveFollower(u, row) {
     state.counts.notFollowedByMe = state.notFollowedByMe.length;
     state.counts.notFollowingBack = state.notFollowingBack.length;
   }
-  setStatus(t("followerRemoved", { user: escapeHtml(u.username) }), "ok");
+  // A manual "Done" is only a local mark, not a confirmation from the site.
+  setStatus(t(manual ? "markedRemoved" : "followerRemoved", { user: escapeHtml(u.username) }), "ok");
   row.classList.add("removing");
   setTimeout(() => {
     row.remove();
@@ -795,7 +827,7 @@ function commitRemoveFollower(u, row) {
   persistState();
 }
 
-function commitUnfollow(u, listKey, row) {
+function commitUnfollow(u, listKey, row, { manual = false } = {}) {
   forgetPending(u.id);
   removeUserFromLists(u.id, ["following", "mutual", "notBack"]);
   if (state.counts) {
@@ -812,7 +844,7 @@ function commitUnfollow(u, listKey, row) {
       state.counts.notFollowedByMe = state.notFollowedByMe.length;
     }
   }
-  setStatus(t("unfollowed", { user: escapeHtml(u.username) }), "ok");
+  setStatus(t(manual ? "markedUnfollowed" : "unfollowed", { user: escapeHtml(u.username) }), "ok");
   if (listKey === "bots") {
     updateBadgesAndStats();
     persistState();
@@ -834,10 +866,10 @@ async function handleFriendship(u, action, listKey, btn, row) {
     (action === "unfollow" || action === "remove_follower") && safeUnfollowActive();
   if (manual) {
     try {
-      if (btn.dataset.opened === "1" || state.pendingManual[pendingKey(u.id)] === action) {
+      if (btn.dataset.opened === "1" || pendingAction(u.id) === action) {
         btn.disabled = true;
-        if (action === "remove_follower") commitRemoveFollower(u, row);
-        else commitUnfollow(u, listKey, row);
+        if (action === "remove_follower") commitRemoveFollower(u, row, { manual: true });
+        else commitUnfollow(u, listKey, row, { manual: true });
         return;
       }
       btn.disabled = true;
@@ -1010,10 +1042,11 @@ function updateBadgesAndStats() {
 
 async function persistState() {
   if (!state.counts || !state.me) return;
+  const platform = state.resultPlatform || state.platformId;
   const result = {
     type: "RESULT",
     ok: true,
-    platform: state.resultPlatform || state.platformId,
+    platform,
     me: state.me,
     counts: state.counts,
     following: state.following,
@@ -1021,13 +1054,33 @@ async function persistState() {
     mutual: state.mutual,
     notFollowingBack: state.notFollowingBack,
     notFollowedByMe: state.notFollowedByMe,
-    finishedAt: Date.now(),
+    // Keep the time of the analysis; local edits are not a fresh check.
+    finishedAt: state.finishedAt || Date.now(),
+    editedAt: Date.now(),
   };
+  // Written by the service worker, and only if the stored result is still the
+  // one this edit is based on (a newer analysis is never overwritten).
+  let res = null;
   try {
-    await chrome.storage.local.set({ lastResult: result });
+    res = await chrome.runtime.sendMessage({
+      type: "FC_RESULT_EDIT",
+      platform,
+      baseJobId: state.resultJobId,
+      baseFinishedAt: state.finishedAt,
+      result,
+    });
   } catch {
-    /* ignore */
+    res = null; // worker unreachable
   }
+  if (res?.ok) return;
+  if (res?.stale) {
+    // A newer analysis was stored meanwhile: show it instead of the outdated edit.
+    const current = await fcJobs.read(fcJobs.keys(platform).result);
+    if (current?.ok) onResult(current, { keepTab: true, restored: true });
+    setStatus(t("editStale"), "error");
+    return;
+  }
+  setStatus(t("editNotSaved"), "error");
 }
 
 function filtered(list) {
@@ -1228,7 +1281,141 @@ function closeTipModal(result) {
   }
 }
 
+/* ---------- analysis job (see fcJobs in fc-shared.js) ---------- */
+
+const JOB_WATCH_MS = 5000;
+let jobWatchTimer = null;
+
+function platformLabel(id) {
+  return platformById(id)?.label || id || "";
+}
+
+function enterRunningState(job) {
+  state.analysisRunning = true;
+  state.jobId = job?.id || null;
+  state.jobPlatform = job?.platform || state.platformId;
+  state.jobAliveAt = Date.now();
+  startBtn.disabled = true;
+  setProgressUi(true, t("analysisInProgress", { platform: platformLabel(state.jobPlatform) }));
+  if (!jobWatchTimer) jobWatchTimer = setInterval(checkRunningJob, JOB_WATCH_MS);
+}
+
+function leaveRunningState() {
+  state.analysisRunning = false;
+  state.jobId = null;
+  state.jobPlatform = null;
+  startBtn.disabled = false;
+  setProgressUi(false);
+  if (jobWatchTimer) {
+    clearInterval(jobWatchTimer);
+    jobWatchTimer = null;
+  }
+}
+
+/** Fallback while waiting: the job may end (or die) without a message reaching this popup. */
+async function checkRunningJob() {
+  if (!state.analysisRunning || !state.jobPlatform) return;
+  const keys = fcJobs.keys(state.jobPlatform);
+  const job = await fcJobs.read(keys.job);
+  if (!state.analysisRunning) return;
+  const same = job && (!state.jobId || job.id === state.jobId);
+  if (same && fcJobs.isActive(job)) {
+    state.jobAliveAt = Date.now();
+    return;
+  }
+  if (same && job.status === "succeeded") {
+    const result = await fcJobs.read(keys.result);
+    if (result?.ok) {
+      onResult(result);
+      return;
+    }
+  }
+  if (same && job.status === "failed") {
+    const err = await fcJobs.read(keys.error);
+    onResult({ type: "RESULT", ok: false, platform: job.platform, jobId: job.id, error: err?.error || job.error });
+    return;
+  }
+  // Record missing (e.g. storage write failed) → only give up after the stale window.
+  if (!same && Date.now() - state.jobAliveAt < fcJobs.STALE_MS) return;
+  const platform = state.jobPlatform;
+  leaveRunningState();
+  setStatus(t("lastRunInterrupted", { platform: escapeHtml(platformLabel(platform)) }), "error");
+}
+
+/** Everything the popup needs to restore: newest good result, newer failure, running job. */
+async function readRestoreSnapshot() {
+  const ids = (typeof PLATFORMS !== "undefined" ? PLATFORMS : []).map((p) => p.id);
+  const wanted = ["lastResult", ...ids.flatMap((id) => Object.values(fcJobs.keys(id)))];
+  let stored = {};
+  try {
+    stored = (await chrome.storage.local.get(wanted)) || {};
+  } catch {
+    stored = {};
+  }
+  const now = Date.now();
+  let result = null;
+  let error = null;
+  let running = null;
+  let interrupted = null;
+  for (const id of ids) {
+    const k = fcJobs.keys(id);
+    const r = stored[k.result];
+    if (r?.ok && !r.impersonating && (!result || (r.finishedAt || 0) > (result.finishedAt || 0))) {
+      result = { ...r, platform: r.platform || id };
+    }
+    const e = stored[k.error];
+    if (e?.error && (!error || (e.at || 0) > (error.at || 0))) error = { ...e, platform: id };
+    const job = stored[k.job];
+    // Only relationship analyses drive the start button / progress view.
+    if (job && job.kind && job.kind !== "analyze") continue;
+    if (fcJobs.isActive(job, now)) running = job;
+    else if (fcJobs.isInterrupted(job, now)) interrupted = job;
+  }
+  const legacy = stored.lastResult;
+  if (!result && legacy?.ok && !legacy.impersonating) {
+    result = { ...legacy, platform: legacy.platform || "instagram" };
+  }
+  if (error && result && (error.at || 0) <= (result.finishedAt || 0)) error = null;
+  return { result, error, running, interrupted, legacyImpersonating: Boolean(legacy?.impersonating) };
+}
+
+/**
+ * Opened-profile reminders of this account that an analysis finished *after*
+ * the reminder was created can confirm are dropped (same rule for live and
+ * restored results). Reminders of other accounts and legacy entries stay.
+ */
+function reconcilePendingManual(platform, accountId, finishedAt, following, followers) {
+  if (!platform || !accountId || !finishedAt) return;
+  const prefix = `${platform}:${accountId}:`;
+  const followingIds = new Set((following || []).map((u) => u.id));
+  const followerIds = new Set((followers || []).map((u) => u.id));
+  let changed = false;
+  for (const [key, value] of Object.entries(state.pendingManual)) {
+    if (!key.startsWith(prefix) || !value || typeof value !== "object") continue;
+    if (!(value.at < finishedAt)) continue;
+    const id = key.slice(prefix.length);
+    const resolved =
+      (value.action === "unfollow" && !followingIds.has(id)) ||
+      (value.action === "remove_follower" && !followerIds.has(id));
+    if (resolved) {
+      delete state.pendingManual[key];
+      changed = true;
+    }
+  }
+  if (changed) chrome.storage.local.set({ pendingManual: state.pendingManual }).catch(() => {});
+}
+
+/** Live PROGRESS/RESULT: only the tracked job, or (when idle) a job of the selected platform. */
+function acceptsJobMessage(msg) {
+  if (!msg?.jobId) return false;
+  if (state.jobId) return msg.jobId === state.jobId;
+  return msg.platform === state.platformId;
+}
+
 function onProgress(msg) {
+  if (!acceptsJobMessage(msg)) return;
+  if (!state.analysisRunning) enterRunningState({ id: msg.jobId, platform: msg.platform });
+  state.jobAliveAt = Date.now();
   setProgressUi(true);
   if (msg.stage === "user" && msg.me) {
     state.me = msg.me;
@@ -1267,13 +1454,17 @@ function onProgress(msg) {
   setProgressUi(true, formatProgress(msg));
 }
 
-function onResult(msg, { keepTab = false } = {}) {
-  startBtn.disabled = false;
-  state.analysisRunning = false;
-  setProgressUi(false);
+function onResult(msg, { keepTab = false, restored = false } = {}) {
+  // Live messages: only the job we are waiting for (or one of the selected platform).
+  if (!restored) {
+    if (!acceptsJobMessage(msg)) return;
+    leaveRunningState();
+  }
 
   if (!msg.ok) {
-    setStatus(escapeHtml(msg.error || t("unknownError")), "error");
+    // Failure never replaces the lists on screen; it is reported next to them.
+    const text = escapeHtml(msg.error || t("unknownError"));
+    setStatus(state.counts ? text + t("lastRunKeptHint") : text, "error");
     return;
   }
 
@@ -1291,6 +1482,10 @@ function onResult(msg, { keepTab = false } = {}) {
   state.notFollowingBack = msg.notFollowingBack || [];
   state.notFollowedByMe = msg.notFollowedByMe || [];
   state.counts = msg.counts;
+  state.finishedAt = msg.finishedAt || null;
+  state.resultJobId = msg.jobId || null;
+  state.resultAccountId = msg.me?.id || null;
+  reconcilePendingManual(state.resultPlatform, state.resultAccountId, state.finishedAt, state.following, state.followers);
 
   // Older cached results may lack full lists — rebuild when possible
   if (!state.following.length && state.mutual.length) {
@@ -1422,7 +1617,6 @@ chrome.runtime.onMessage.addListener((msg) => {
 async function init() {
   const stored = await chrome.storage.local.get([
     "lang",
-    "lastResult",
     "lastLiked",
     "unfollowMode",
     "pendingManual",
@@ -1449,17 +1643,32 @@ async function init() {
   applyStaticI18n();
   show(sectionNav, true);
 
-  if (stored.lastResult?.ok && !stored.lastResult.impersonating) {
-    if (stored.lastResult.platform) state.resultPlatform = stored.lastResult.platform;
-    onResult(stored.lastResult, { keepTab: true });
-    if (stored.lastResult.finishedAt) {
-      const agoMin = Math.round(
-        (Date.now() - stored.lastResult.finishedAt) / 60000
-      );
+  const restore = await readRestoreSnapshot();
+  if (restore.result) {
+    state.resultPlatform = restore.result.platform;
+    onResult(restore.result, { keepTab: true, restored: true });
+    if (restore.result.finishedAt) {
+      const agoMin = Math.round((Date.now() - restore.result.finishedAt) / 60000);
       const ago = agoMin > 0 ? t("lastResultAgo", { n: agoMin }) : "";
       setStatus(t("lastResult", { ago }), "ok");
     }
-  } else if (stored.lastResult?.impersonating) {
+  }
+  if (restore.error) {
+    const text = t("lastRunFailed", {
+      platform: escapeHtml(platformLabel(restore.error.platform)),
+      error: escapeHtml(restore.error.error),
+    });
+    setStatus(restore.result ? text + t("lastRunKeptHint") : text, "error");
+  }
+  if (restore.running) {
+    enterRunningState(restore.running);
+  } else if (restore.interrupted) {
+    setStatus(
+      t("lastRunInterrupted", { platform: escapeHtml(platformLabel(restore.interrupted.platform)) }),
+      "error"
+    );
+  }
+  if (restore.legacyImpersonating) {
     try {
       await chrome.storage.local.remove(["lastResult"]);
     } catch {
@@ -1518,15 +1727,19 @@ async function runGlobalAnalysis() {
     const tab = await getIgTab();
     await ensureContentScript(tab.id);
     const res = await chrome.tabs.sendMessage(tab.id, { type: "ANALYZE" });
-    if (!res?.started && res?.error) {
-      throw new Error(res.error);
+    if (res?.busy && res.job?.kind === "analyze") {
+      // Already running (e.g. started before the popup was reopened): follow it.
+      enterRunningState(res.job);
+      return;
+    }
+    if (!res?.started) {
+      throw new Error(res?.error || t("unknownError"));
     }
     state.analysisRuns += 1;
+    enterRunningState({ id: res.jobId, platform: state.platformId });
     setProgressUi(true, t("loadingLists"));
   } catch (err) {
-    state.analysisRunning = false;
-    startBtn.disabled = false;
-    setProgressUi(false);
+    leaveRunningState();
     setStatus(err?.message || String(err), "error");
   }
 }

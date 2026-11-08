@@ -59,6 +59,11 @@
   window.addEventListener("message", async (event) => {
     if (event.source !== window) return;
     const msg = event.data;
+    if (msg && msg.source === "fc-content" && msg.type === "FC_PING" && msg.id) {
+      // Presence probe: answer immediately, independent of any network request.
+      window.postMessage({ source: "fc-bridge", type: "FC_PONG", id: msg.id }, location.origin);
+      return;
+    }
     if (msg && msg.source === "fc-content" && msg.type === "FC_VIEWER" && msg.id) {
       window.postMessage(
         { source: "fc-bridge", type: "FC_VIEWER_RESULT", id: msg.id, viewer: readViewer() },

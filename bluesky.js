@@ -56,12 +56,16 @@
     for (const [key, value] of Object.entries(params)) {
       if (value) url.searchParams.set(key, value);
     }
-    const res = await fetch(url.toString(), { credentials: "omit" });
+    const res = await fcFetchText(url.toString(), { credentials: "omit" }, { label: "Bluesky request" });
     if (res.status === 429) {
       throw new Error("Bluesky rate-limited requests (429). Wait a minute and try again.");
     }
     if (!res.ok) throw new Error(`Bluesky responded with HTTP ${res.status}`);
-    return res.json();
+    try {
+      return JSON.parse(res.text);
+    } catch {
+      throw new Error("Bluesky returned a non-JSON response.");
+    }
   }
 
   async function getMe() {
@@ -79,16 +83,40 @@
     };
   }
 
+  const MAX_PAGES = 200;
+
   async function fetchList(actor, method, listKey, onProgress, expected) {
     const users = [];
+    const seen = new Set();
+    const guard = fcPageGuard(`Bluesky ${listKey}`);
     let cursor = "";
-    for (let page = 0; page < 200; page += 1) {
+    const add = (batch) => {
+      const before = users.length;
+      for (const user of batch.map(mapUser)) {
+        if (!user.id || seen.has(user.id)) continue;
+        seen.add(user.id);
+        users.push(user);
+      }
+      return users.length - before;
+    };
+    for (let page = 0; ; page += 1) {
       const data = await bskyGet(method, { actor, limit: "100", cursor });
       const batch = Array.isArray(data[listKey]) ? data[listKey] : [];
-      users.push(...batch.map(mapUser).filter((u) => u.id));
+      const added = add(batch);
       if (onProgress) onProgress(users.length);
       cursor = data.cursor || "";
       if (!cursor || batch.length === 0) break;
+      if (page + 1 >= MAX_PAGES) {
+        // A cursor is not proof of more data: one probe page decides.
+        await fcSleep(350);
+        const probe = await bskyGet(method, { actor, limit: "100", cursor });
+        const probeBatch = Array.isArray(probe[listKey]) ? probe[listKey] : [];
+        if (probeBatch.length > 0 && probe.cursor) throw fcIncompleteError(`Bluesky ${listKey}`, users.length);
+        add(probeBatch);
+        if (onProgress) onProgress(users.length);
+        break;
+      }
+      guard.check(cursor, added, users.length);
       await fcSleep(350);
     }
     if (expected > 0 && users.length === 0) {

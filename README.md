@@ -151,7 +151,7 @@ node scripts/package-zip.mjs
 | `docs/V1.2-CONCEPT.md` | v1.2 product concept notes |
 | `store/` | Chrome Web Store assets & form answers |
 
-Data stays in the browser (`chrome.storage.local` for language + last result).
+Data stays in the browser (`chrome.storage.local` for language, the last result per site, and analysis status / last error).
 
 ---
 
